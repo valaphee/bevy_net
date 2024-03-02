@@ -1,0 +1,24 @@
+[package]
+name = "bevy_replicate_example"
+version = "0.1.0"
+authors = ["Valaphee <iam@valaphee.com>"]
+description = "Replication for Bevy example"
+repository = "https://github.com/valaphee/bevy_replicate.git"
+license = "Apache-2.0"
+edition = "2021"
+
+[dependencies]
+bevy = { path = "../../bevy", default-features = false }
+tokio = { version = "1.28.1", features = ["full"] }
+bevy_replicate = { path = ".." }
+
+[features]
+client = [
+    "bevy/bevy_winit",
+    "bevy/bevy_pbr",
+    "bevy/ktx2",
+    "bevy/zstd",
+    "bevy/tonemapping_luts",
+    "bevy/x11",
+]
+server = []

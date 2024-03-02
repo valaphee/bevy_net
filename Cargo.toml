@@ -8,8 +8,13 @@ license = "Apache-2.0"
 edition = "2021"
 
 [dependencies]
-bevy = { git = "https://github.com/bevyengine/bevy.git", default-features = false }
+bevy = { path = "../bevy", default-features = false }
+quinn = "0.10.2"
+rustls = "0.21.0"
+rcgen = "0.12.1"
+tokio = { version = "1.28.1", features = ["full"] }
 
-[dev-dependencies]
-bevy = { git = "https://github.com/bevyengine/bevy.git", default-features = false, features = ["bevy_winit", "bevy_pbr", "ktx2", "zstd", "tonemapping_luts", "mp3"] }
+[workspace]
+resolver = "2"
+members = ["example"]
 
