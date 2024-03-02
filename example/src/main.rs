@@ -8,20 +8,23 @@ use bevy::prelude::*;
 async fn main() {
     let mut app = App::new();
 
+    app.add_event::<ShootBall>();
+
     #[cfg(feature = "client")]
     app
-        .add_plugins((DefaultPlugins, bevy_replicate::client::ClientPlugin))
+        .add_plugins((DefaultPlugins, bevy_replicate::client::ClientPlugin::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, (grab_mouse, process_input, shoot_ball));
+        .add_systems(Update, (grab_mouse, process_input, shoot_ball_client, spawn_ball_client));
 
     #[cfg(feature = "server")]
     app
         .add_plugins(
             (MinimalPlugins.set(bevy::app::ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
                 1.0 / 20.0,
-            ))), bevy_replicate::server::ServerPlugin),
+            ))), bevy_replicate::server::ServerPlugin::default()),
         )
-        .add_plugins(bevy::log::LogPlugin::default());
+        .add_plugins(bevy::log::LogPlugin::default())
+        .add_systems(Update, shoot_ball_server);
 
     app
         .add_systems(Update, simulate_ball)
@@ -65,27 +68,49 @@ fn setup(
     }, Freecam));
 }
 
+#[derive(Event)]
+struct ShootBall;
+
 #[derive(Component)]
 struct Ball;
 
 #[cfg(feature = "client")]
-fn shoot_ball(
-    mut commands: Commands,
-
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+fn shoot_ball_client(
     mouse_input: Res<ButtonInput<MouseButton>>,
 
-    freecams: Query<&Transform, With<Freecam>>,
+    mut shoot_ball_events: EventWriter<ShootBall>,
 ) {
-    let freecam = freecams.single();
     if mouse_input.just_pressed(MouseButton::Left) {
-        commands.spawn((PbrBundle {
+        shoot_ball_events.send(ShootBall);
+    }
+}
+
+#[cfg(feature = "server")]
+fn shoot_ball_server(
+    mut commands: Commands,
+
+    mut shoot_ball_events: EventReader<ShootBall>,
+) {
+    for _ in shoot_ball_events.read() {
+        commands.spawn(Ball);
+    }
+}
+
+#[cfg(feature = "client")]
+fn spawn_ball_client(
+    mut commands: Commands,
+    
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+
+    balls: Query<Entity, Added<Ball>>,
+) {
+    for ball in balls.iter() {
+        commands.entity(ball).insert(PbrBundle {
             mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
             material: materials.add(LegacyColor::rgb_u8(124, 144, 255)),
-            transform: freecam.clone(),
             ..default()
-        }, Ball));
+        });
     }
 }
 
