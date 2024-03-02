@@ -1,20 +1,24 @@
 //! A simple 3D scene with light shining over a cube sitting on a plane.
 
-use std::{f32::consts::{FRAC_PI_2, PI}, time::Duration};
+use std::{any::{Any, TypeId}, f32::consts::{FRAC_PI_2, PI}, time::Duration};
 
-use bevy::prelude::*;
+use bevy::{prelude::*, reflect::{serde::{ReflectSerializer, TypedReflectSerializer, UntypedReflectDeserializer}, FromType, TypeRegistry}, scene::{ron::Deserializer, serialize_ron}};
+use bevy_replicate::{Connection, NewConnectionRx};
+use serde::de::DeserializeSeed;
 
 #[tokio::main]
 async fn main() {
     let mut app = App::new();
 
-    app.add_event::<ShootBall>();
+    app.add_event::<ShootBall>().register_type::<ShootBall>();
 
     #[cfg(feature = "client")]
     app
         .add_plugins((DefaultPlugins, bevy_replicate::client::ClientPlugin::default()))
         .add_systems(Startup, setup)
-        .add_systems(Update, (grab_mouse, process_input, shoot_ball_client, spawn_ball_client));
+        .add_systems(Update, (grab_mouse, process_input, shoot_ball_client, spawn_ball_client))
+        .add_systems(PostUpdate, shoot_ball_send)
+        .add_systems(PreUpdate, (network_recv, spawn_conn));
 
     #[cfg(feature = "server")]
     app
@@ -24,11 +28,20 @@ async fn main() {
             ))), bevy_replicate::server::ServerPlugin::default()),
         )
         .add_plugins(bevy::log::LogPlugin::default())
-        .add_systems(Update, shoot_ball_server);
+        .add_systems(Update, shoot_ball_server)
+        .add_systems(PreUpdate, (network_recv, spawn_conn));
 
     app
         .add_systems(Update, simulate_ball)
         .run();
+}
+
+fn spawn_conn(mut commands: Commands, mut new_connection_rx: ResMut<NewConnectionRx>) {
+    while let Ok(connection) = new_connection_rx.0.try_recv() {
+        info!("Player connected");
+
+        commands.spawn(connection);
+    }
 }
 
 /// set up a simple 3D scene
@@ -41,14 +54,14 @@ fn setup(
     // circular base
     commands.spawn(PbrBundle {
         mesh: meshes.add(Circle::new(4.0)),
-        material: materials.add(LegacyColor::WHITE),
+        material: materials.add(Color::WHITE),
         transform: Transform::from_rotation(Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2)),
         ..default()
     });
     // cube
     commands.spawn(PbrBundle {
         mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-        material: materials.add(LegacyColor::rgb_u8(124, 144, 255)),
+        material: materials.add(Color::srgb_u8(124, 144, 255)),
         transform: Transform::from_xyz(0.0, 0.5, 0.0),
         ..default()
     });
@@ -68,10 +81,47 @@ fn setup(
     }, Freecam));
 }
 
-#[derive(Event)]
+#[derive(Event, Reflect, Default)]
+#[reflect(Event)]
 struct ShootBall;
 
-#[derive(Component)]
+fn network_recv(
+    mut world: &mut World,
+) {
+    let mut connections = world.query::<&mut Connection>();
+
+    let unsafe_world_cell = world.as_unsafe_world_cell();
+    let type_registry = unsafe { unsafe_world_cell.get_resource_mut::<AppTypeRegistry>() }.unwrap();
+    let type_reg = type_registry.read(); 
+    for mut connection in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
+        while let Ok(value) = connection.rx.try_recv() {
+            println!("Raw {:?}", value);
+            let ron = std::str::from_utf8(&value).unwrap();
+            println!("Recv {}", ron);
+            let deserializer =  UntypedReflectDeserializer::new(&type_reg);
+            let mut deser = Deserializer::from_str(&ron).unwrap();
+            let ev = deserializer.deserialize(&mut deser).unwrap();
+            type_reg.get(ev.get_represented_type_info().unwrap().type_id()).unwrap().data::<ReflectEvent>().unwrap().send(unsafe { unsafe_world_cell.world_mut() }, ev.as_ref(), &type_reg);
+        }
+    }
+}
+
+fn shoot_ball_send(
+    type_registry: Res<AppTypeRegistry>,
+    mut shoot_ball_events: EventReader<ShootBall>,
+
+    connections: Query<&Connection>,
+) {
+    for connection in connections.iter() {
+        for event in shoot_ball_events.read() {
+            let ron = serialize_ron(ReflectSerializer::new(event, &type_registry.read())).unwrap();
+            connection.tx.send(ron.into_bytes()).unwrap();
+        }
+    }
+}
+
+#[derive(Component, Reflect, Default)]
+#[reflect(Component)]
 struct Ball;
 
 #[cfg(feature = "client")]
@@ -92,6 +142,7 @@ fn shoot_ball_server(
     mut shoot_ball_events: EventReader<ShootBall>,
 ) {
     for _ in shoot_ball_events.read() {
+        println!("spawn ball");
         commands.spawn(Ball);
     }
 }
@@ -108,7 +159,7 @@ fn spawn_ball_client(
     for ball in balls.iter() {
         commands.entity(ball).insert(PbrBundle {
             mesh: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-            material: materials.add(LegacyColor::rgb_u8(124, 144, 255)),
+            material: materials.add(Color::srgb_u8(124, 144, 255)),
             ..default()
         });
     }

@@ -6,7 +6,6 @@ use tokio::sync::mpsc;
 
 pub mod client;
 pub mod server;
-pub mod codec;
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -21,11 +20,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Component)]
 pub struct Connection {
-    address: SocketAddr,
+    pub address: SocketAddr,
 
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    pub rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 #[derive(Resource)]
-struct NewConnectionRx(mpsc::UnboundedReceiver<Connection>);
+pub struct NewConnectionRx(pub mpsc::UnboundedReceiver<Connection>);
