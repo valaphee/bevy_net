@@ -12,6 +12,7 @@ bevy = { path = "../../bevy", default-features = false, features = ["serialize",
 tokio = { version = "1.28.1", features = ["full"] }
 bevy_replicate = { path = ".." }
 serde = { version = "1" }
+byteorder = "1.4.3"
 
 [features]
 client = [

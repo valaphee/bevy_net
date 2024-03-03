@@ -2,23 +2,26 @@
 
 use std::{any::{Any, TypeId}, f32::consts::{FRAC_PI_2, PI}, time::Duration};
 
-use bevy::{prelude::*, reflect::{serde::{ReflectSerializer, TypedReflectSerializer, UntypedReflectDeserializer}, FromType, TypeRegistry}, scene::{ron::Deserializer, serialize_ron}};
+use bevy::{prelude::*, reflect::{serde::{ReflectSerializer, TypedReflectSerializer, UntypedReflectDeserializer}, FromType, TypeData, TypeRegistry}, scene::{ron::Deserializer, serde::SceneMapSerializer, serialize_ron}, utils::HashMap};
 use bevy_replicate::{Connection, NewConnectionRx};
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::de::DeserializeSeed;
 
 #[tokio::main]
 async fn main() {
     let mut app = App::new();
 
-    app.add_event::<ShootBall>().register_type::<ShootBall>();
+    app.add_event::<ShootBall>()
+        .register_type::<ShootBall>()
+        .register_type::<Ball>();
 
     #[cfg(feature = "client")]
     app
         .add_plugins((DefaultPlugins, bevy_replicate::client::ClientPlugin::default()))
         .add_systems(Startup, setup)
         .add_systems(Update, (grab_mouse, process_input, shoot_ball_client, spawn_ball_client))
-        .add_systems(PostUpdate, shoot_ball_send)
-        .add_systems(PreUpdate, (network_recv, spawn_conn));
+        .add_systems(PreUpdate, (network_recv, spawn_conn))
+        .add_systems(PostUpdate, shoot_ball_send);
 
     #[cfg(feature = "server")]
     app
@@ -29,7 +32,8 @@ async fn main() {
         )
         .add_plugins(bevy::log::LogPlugin::default())
         .add_systems(Update, shoot_ball_server)
-        .add_systems(PreUpdate, (network_recv, spawn_conn));
+        .add_systems(PreUpdate, (network_recv, spawn_conn))
+        .add_systems(PostUpdate, ball_send);
 
     app
         .add_systems(Update, simulate_ball)
@@ -85,8 +89,14 @@ fn setup(
 #[reflect(Event)]
 struct ShootBall;
 
+#[derive(Default)]
+struct EntityMapper {
+    remote_to_local: HashMap<u64, Entity>
+}
+
 fn network_recv(
     mut world: &mut World,
+    mut mapper: Local<EntityMapper>,
 ) {
     let mut connections = world.query::<&mut Connection>();
 
@@ -95,13 +105,28 @@ fn network_recv(
     let type_reg = type_registry.read(); 
     for mut connection in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
         while let Ok(value) = connection.rx.try_recv() {
-            println!("Raw {:?}", value);
-            let ron = std::str::from_utf8(&value).unwrap();
-            println!("Recv {}", ron);
+            let mut valuere = &value[..];
+            let typ = valuere.read_u8().unwrap();
+            println!("Raw {:?}", valuere);
+            let pl = valuere.read_u64::<LittleEndian>().unwrap();
+            println!("Raw {:?}", valuere);
+            let ron = std::str::from_utf8(&valuere).unwrap();
+            println!("Recv {} {} {}", typ, pl, ron);
             let deserializer =  UntypedReflectDeserializer::new(&type_reg);
             let mut deser = Deserializer::from_str(&ron).unwrap();
             let ev = deserializer.deserialize(&mut deser).unwrap();
-            type_reg.get(ev.get_represented_type_info().unwrap().type_id()).unwrap().data::<ReflectEvent>().unwrap().send(unsafe { unsafe_world_cell.world_mut() }, ev.as_ref(), &type_reg);
+            if typ == 0x01 {
+                let mut entitymutator = if let Some(entity) = mapper.remote_to_local.get(&pl) {
+                    unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity)
+                } else {
+                    let usa = unsafe { unsafe_world_cell.world_mut() }.spawn(());
+                    mapper.remote_to_local.insert(pl, usa.id());
+                    usa
+                };
+                type_reg.get(ev.get_represented_type_info().unwrap().type_id()).unwrap().data::<ReflectComponent>().unwrap().apply_or_insert(&mut entitymutator, ev.as_ref(), &type_reg);
+            } else {
+                type_reg.get(ev.get_represented_type_info().unwrap().type_id()).unwrap().data::<ReflectEvent>().unwrap().send(unsafe { unsafe_world_cell.world_mut() }, ev.as_ref(), &type_reg);
+            }
         }
     }
 }
@@ -115,7 +140,26 @@ fn shoot_ball_send(
     for connection in connections.iter() {
         for event in shoot_ball_events.read() {
             let ron = serialize_ron(ReflectSerializer::new(event, &type_registry.read())).unwrap();
-            connection.tx.send(ron.into_bytes()).unwrap();
+            let mut rb = vec![0x00u8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+            rb.extend_from_slice(ron.as_bytes());
+            connection.tx.send(rb).unwrap();
+        }
+    }
+}
+
+fn ball_send(
+    type_registry: Res<AppTypeRegistry>,
+    balls: Query<(Entity, &Ball), Changed<Ball>>,
+
+    connections: Query<&Connection>,
+) {
+    for connection in connections.iter() {
+        for (ent, ball) in balls.iter() {
+            let ron = serialize_ron(ReflectSerializer::new(ball, &type_registry.read())).unwrap();
+            let mut rb = vec![0x01u8];
+            rb.write_u64::<LittleEndian>(ent.to_bits()).unwrap();
+            rb.extend_from_slice(ron.as_bytes());
+            connection.tx.send(rb).unwrap();
         }
     }
 }
