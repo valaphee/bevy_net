@@ -1,3 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["example"]
+
 [package]
 name = "bevy_replicate"
 version = "0.1.0"
@@ -9,16 +13,9 @@ edition = "2021"
 
 [dependencies]
 bevy = { path = "../bevy", default-features = false }
-tokio = { version = "1.28.1", features = ["full"] }
-aes = "0.8.2"
-cfb8 = "0.8.1"
-flate2 = "1.0.25"
-tokio-util = { version = "0.7.7", features = ["codec"] }
-bytes = "1.4.0"
-thiserror = "1.0.38"
-byteorder = "1.4.3"
-futures = "0.3.26"
 
-[workspace]
-resolver = "2"
-members = ["example"]
+tokio = { version = "1.36", features = ["net", "rt-multi-thread", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+byteorder = "1.5"
+serde = "1.0"
