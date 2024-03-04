@@ -8,8 +8,8 @@ use bevy::{
     ecs::{
         component::{Component, ComponentId, StorageType},
         entity::Entity,
-        event::{Event, Events},
-        system::{Commands, Query, Res, ResMut, Resource, SystemChangeTick},
+        event::{Event, Events, ManualEventReader},
+        system::{Commands, Local, Query, Res, ResMut, Resource, SystemChangeTick},
         world::{EntityWorldMut, World},
     },
     ptr::Ptr,
@@ -21,9 +21,9 @@ use tokio::sync::mpsc;
 
 #[derive(Resource, Default)]
 pub struct Replication {
-    resource_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>))>,
+    event_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>, &mut usize))>,
+    event_deserializers: HashMap<u64, fn(&mut World, &mut &[u8])>,
     component_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>))>,
-    resource_deserializers: HashMap<u64, fn(&mut World, &mut &[u8])>,
     component_deserializers: HashMap<u64, fn(&mut EntityWorldMut, &mut &[u8])>,
 }
 
@@ -53,7 +53,7 @@ impl AppExt for App {
 
         let mut replication = self.world.resource_mut::<Replication>();
         replication
-            .resource_serializers
+            .event_serializers
             .insert(component_id, (type_hash, serialize_events::<E>));
 
         self
@@ -68,7 +68,7 @@ impl AppExt for App {
 
         let mut replication = self.world.resource_mut::<Replication>();
         replication
-            .resource_deserializers
+            .event_deserializers
             .insert(type_hash, deserialize_and_send_events::<E>);
 
         self
@@ -103,18 +103,22 @@ impl AppExt for App {
     }
 }
 
-pub fn serialize<T: Serialize>(value: Ptr, output: &mut Vec<u8>) {
+fn serialize<T: Serialize>(value: Ptr, output: &mut Vec<u8>) {
     use bincode::{DefaultOptions, Options};
 
     let value: &T = unsafe { value.deref() };
     DefaultOptions::new().serialize_into(output, value).unwrap();
 }
 
-pub fn serialize_events<E: Event + Serialize>(events: Ptr, output: &mut Vec<u8>) {
+fn serialize_events<E: Event + Serialize>(
+    events: Ptr,
+    output: &mut Vec<u8>,
+    last_event_count: &mut usize,
+) {
     use bincode::{DefaultOptions, Options};
 
     let events: &Events<E> = unsafe { events.deref() };
-    let mut event_reader = events.get_reader();
+    let event_reader: &mut ManualEventReader<E> = unsafe { std::mem::transmute(last_event_count) };
     let events = event_reader.read(events).collect::<Vec<_>>();
     if !events.is_empty() {
         DefaultOptions::new()
@@ -123,7 +127,7 @@ pub fn serialize_events<E: Event + Serialize>(events: Ptr, output: &mut Vec<u8>)
     }
 }
 
-pub fn deserialize_and_send_events<E: Event + DeserializeOwned>(
+fn deserialize_and_send_events<E: Event + DeserializeOwned>(
     world: &mut World,
     mut input: &mut &[u8],
 ) {
@@ -133,7 +137,7 @@ pub fn deserialize_and_send_events<E: Event + DeserializeOwned>(
     world.send_event_batch(events);
 }
 
-pub fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
+fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity: &mut EntityWorldMut,
     mut input: &mut &[u8],
 ) {
@@ -164,11 +168,15 @@ pub(crate) fn spawn_new_connections(
     }
 }
 
+#[derive(Default)]
+pub(crate) struct EventReaders(HashMap<u64, usize>);
+
 pub(crate) fn send_updates(
     world: &World,
     change_tick: SystemChangeTick,
     replication: Res<Replication>,
     connections: Query<&Connection>,
+    mut event_readers: Local<EventReaders>,
 ) {
     for connection in connections.iter() {
         let mut update = Vec::new();
@@ -271,8 +279,8 @@ pub(crate) fn send_updates(
             }
         }
 
-        // Send all resources (in particular events)
-        for (component_id, (type_hash, serialize)) in replication.resource_serializers.iter() {
+        // Write all events
+        for (component_id, (type_hash, serialize)) in replication.event_serializers.iter() {
             update.write_u64::<LittleEndian>(*type_hash).unwrap();
 
             let resource_data = world.storages().resources.get(*component_id).unwrap();
@@ -283,7 +291,8 @@ pub(crate) fn send_updates(
             }*/
 
             let update_len = update.len();
-            serialize(resource, &mut update);
+            let last_event_count = event_readers.0.entry(*type_hash).or_default();
+            serialize(resource, &mut update, last_event_count);
 
             // Check if resource is empty
             if update_len == update.len() {
@@ -343,8 +352,7 @@ pub(crate) fn recv_updates(world: &mut World) {
 
                         entity = update.read_u64::<LittleEndian>().unwrap();
                     }
-                } else if let Some(deserialize) = replication.resource_deserializers.get(&type_hash)
-                {
+                } else if let Some(deserialize) = replication.event_deserializers.get(&type_hash) {
                     deserialize(unsafe { unsafe_world_cell.world_mut() }, &mut update);
                 }
 

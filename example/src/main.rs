@@ -56,17 +56,7 @@ struct Ball;
 struct ShootBall;
 
 #[cfg(feature = "client")]
-fn setup(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn(PbrBundle {
-        mesh: meshes.add(Circle::new(4.0)),
-        material: materials.add(Color::WHITE),
-        transform: Transform::from_rotation(Quat::from_rotation_x(-FRAC_PI_2)),
-        ..default()
-    });
+fn setup(mut commands: Commands) {
     commands.spawn(PointLightBundle {
         point_light: PointLight {
             shadows_enabled: true,
@@ -86,13 +76,16 @@ fn setup(
 
 #[cfg(feature = "client")]
 fn shoot_ball_client(
-    mouse_input: Res<ButtonInput<MouseButton>>,
     mut shoot_ball_events: EventWriter<ShootBall>,
+    time: Res<Time>,
+    mut timer: Local<Timer>,
 ) {
-    if mouse_input.just_pressed(MouseButton::Left) {
+    if timer.finished() {
+        timer.set_duration(Duration::from_secs(1));
+        timer.reset();
         shoot_ball_events.send(ShootBall);
-        println!("Shoot ball");
     }
+    timer.tick(time.delta());
 }
 
 #[cfg(feature = "server")]
@@ -124,7 +117,7 @@ fn setup_ball_client(
 
 fn simulate_ball(time: Res<Time>, mut balls: Query<&mut Transform, With<Ball>>) {
     for mut ball in balls.iter_mut() {
-        ball.translation += Vec3::X * time.elapsed_seconds() * 0.0125;
+        ball.translation += Vec3::X * time.delta_seconds();
         //println!("Simulate ball");
     }
 }
