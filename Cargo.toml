@@ -3,11 +3,11 @@ resolver = "2"
 members = ["example"]
 
 [package]
-name = "bevy_replicate"
+name = "bevy_net"
 version = "0.1.0"
 authors = ["Valaphee <iam@valaphee.com>"]
-description = "Replication for Bevy"
-repository = "https://github.com/valaphee/bevy_replicate.git"
+description = "Networking for Bevy"
+repository = "https://github.com/valaphee/bevy_net.git"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -19,3 +19,4 @@ tokio-util = { version = "0.7", features = ["codec"] }
 futures = "0.3"
 byteorder = "1.5"
 serde = "1.0"
+bincode = "1.3"

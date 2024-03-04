@@ -1,15 +1,17 @@
 [package]
-name = "bevy_replicate_example"
+name = "bevy_net_example"
 version = "0.1.0"
 authors = ["Valaphee <iam@valaphee.com>"]
-description = "Replication for Bevy example"
-repository = "https://github.com/valaphee/bevy_replicate.git"
+description = "Networking for Bevy example"
+repository = "https://github.com/valaphee/bevy_net.git"
 license = "Apache-2.0"
 edition = "2021"
 
 [dependencies]
-bevy = { path = "../../bevy", default-features = false, features = ["serialize", "bevy_scene"] }
-bevy_replicate = { path = ".." }
+bevy = { path = "../../bevy", default-features = false }
+bevy_net = { path = ".." }
+serde = "1.0"
+tokio = { version = "1.36", features = [ "rt-multi-thread", "macros"] }
 
 [features]
 client = [

@@ -1,1 +1,2 @@
-mod transport;
+pub mod transport;
+pub mod registry;
