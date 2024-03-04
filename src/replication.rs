@@ -1,18 +1,15 @@
 use std::{any::type_name, hash::{DefaultHasher, Hash, Hasher}};
 
-use bevy::{app::App, ecs::{component::{Component, ComponentId, StorageType}, entity::Entity, event::{Event, Events}, system::{Query, Res, Resource, SystemChangeTick}, world::{EntityWorldMut, World}}, ptr::Ptr, utils::HashMap};
-use bincode::{DefaultOptions, Options};
+use bevy::{app::App, ecs::{component::{Component, ComponentId, StorageType}, entity::Entity, event::{Event, Events}, system::{Commands, Query, Res, ResMut, Resource, SystemChangeTick}, world::{EntityWorldMut, World}}, ptr::Ptr, utils::HashMap};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{de::DeserializeOwned, Serialize};
-
-use crate::transport::Connection;
+use tokio::sync::mpsc;
 
 #[derive(Resource, Default)]
-pub(crate) struct Registry {
+pub struct Replication {
     resource_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>))>,
-    resource_deserializers: HashMap<u64, fn(&mut World, &mut &[u8])>,
-
     component_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>))>,
+    resource_deserializers: HashMap<u64, fn(&mut World, &mut &[u8])>,
     component_deserializers: HashMap<u64, fn(&mut EntityWorldMut, &mut &[u8])>,
 }
 
@@ -35,8 +32,8 @@ impl AppExt for App {
         type_name::<E>().hash(&mut hasher);
         let type_hash = hasher.finish();
 
-        let mut registry = self.world.resource_mut::<Registry>();
-        registry.resource_serializers.insert(component_id, (type_hash, serialize_events::<E>));
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.resource_serializers.insert(component_id, (type_hash, serialize_events::<E>));
 
         self
     }
@@ -48,8 +45,8 @@ impl AppExt for App {
         type_name::<E>().hash(&mut hasher);
         let type_hash = hasher.finish();
 
-        let mut registry = self.world.resource_mut::<Registry>();
-        registry.resource_deserializers.insert(type_hash, deserialize_and_send_events::<E>);
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.resource_deserializers.insert(type_hash, deserialize_and_send_events::<E>);
 
         self
     }
@@ -61,8 +58,8 @@ impl AppExt for App {
         type_name::<C>().hash(&mut hasher);
         let type_hash = hasher.finish();
 
-        let mut registry = self.world.resource_mut::<Registry>();
-        registry.component_serializers.insert(component_id, (type_hash, serialize::<C>));
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.component_serializers.insert(component_id, (type_hash, serialize::<C>));
 
         self
     }
@@ -72,25 +69,29 @@ impl AppExt for App {
         type_name::<C>().hash(&mut hasher);
         let type_hash = hasher.finish();
 
-        let mut registry = self.world.resource_mut::<Registry>();
-        registry.component_deserializers.insert(type_hash, deserialize_and_insert_component::<C>);
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.component_deserializers.insert(type_hash, deserialize_and_insert_component::<C>);
 
         self
     }
 }
 
-fn serialize<T: Serialize>(
+pub fn serialize<T: Serialize>(
     value: Ptr,
     output: &mut Vec<u8>,
 ) {
+    use bincode::{DefaultOptions, Options};
+
     let value: &T = unsafe { value.deref() };
     DefaultOptions::new().serialize_into(output, value).unwrap();
 }
 
-fn serialize_events<E: Event + Serialize>(
+pub fn serialize_events<E: Event + Serialize>(
     events: Ptr,
     output: &mut Vec<u8>,
 ) {
+    use bincode::{DefaultOptions, Options};
+
     let events: &Events<E> = unsafe { events.deref() };
     let mut event_reader = events.get_reader();
     let events = event_reader.read(events).collect::<Vec<_>>();
@@ -99,36 +100,60 @@ fn serialize_events<E: Event + Serialize>(
     }
 }
 
-fn deserialize_and_send_events<E: Event + DeserializeOwned>(
+pub fn deserialize_and_send_events<E: Event + DeserializeOwned>(
     world: &mut World,
     mut input: &mut &[u8],
 ) {
+    use bincode::{DefaultOptions, Options};
+
     let events: Vec<E> = DefaultOptions::new().deserialize_from(&mut input).unwrap();
     world.send_event_batch(events);
 }
 
-fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
+pub fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity: &mut EntityWorldMut,
     mut input: &mut &[u8],
 ) {
+    use bincode::{DefaultOptions, Options};
+
     let component: C = DefaultOptions::new().deserialize_from(&mut input).unwrap();
     entity.insert(component);
 }
 
-pub(crate) fn send_update(
+#[derive(Resource)]
+pub struct NewConnectionRx(pub(crate) mpsc::UnboundedReceiver<Connection>);
+
+#[derive(Component)]
+pub struct Connection {
+    pub(crate) message_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    pub(crate) message_tx: mpsc::UnboundedSender<Vec<u8>>,
+
+    pub(crate) entities: HashMap<u64, Entity>,
+    pub(crate) entities_added: Vec<(u64, Entity)>,
+}
+
+pub(crate) fn spawn_new_connections(
+    mut commands: Commands,
+    mut new_connection_rx: ResMut<NewConnectionRx>
+) {
+    while let Ok(connection) = new_connection_rx.0.try_recv() {
+        commands.spawn(connection);
+    }
+}
+
+pub(crate) fn send_updates(
     world: &World,
     change_tick: SystemChangeTick,
-    registry: Res<Registry>,
+    replication: Res<Replication>,
     connections: Query<&Connection>,
 ) {
     for connection in connections.iter() {
         let mut update = Vec::new();
-        let mut should_update = false;
 
         for archetype in world.archetypes().iter() {
             let table = unsafe { world.storages().tables.get(archetype.table_id()).unwrap_unchecked() };
             for component_id in archetype.components() {
-                let Some((type_hash, serialize)) = registry.component_serializers.get(&component_id) else {
+                let Some((type_hash, serialize)) = replication.component_serializers.get(&component_id) else {
                     continue;
                 };
                 update.write_u64::<LittleEndian>(*type_hash).unwrap();
@@ -144,10 +169,8 @@ pub(crate) fn send_update(
                                 continue;
                             }
 
-                            println!("Entity {type_hash} {}", archetype_entity.id().to_bits());
                             update.write_u64::<LittleEndian>(archetype_entity.id().to_bits()).unwrap();
                             serialize(component, &mut update);
-                            should_update = true;
                         }
                         update.write_u64::<LittleEndian>(0).unwrap();
                     },
@@ -160,17 +183,15 @@ pub(crate) fn send_update(
                                 continue;
                             }
 
-                            println!("Entity {type_hash} {}", archetype_entity.id().to_bits());
                             update.write_u64::<LittleEndian>(archetype_entity.id().to_bits()).unwrap();
                             serialize(component, &mut update);
-                            should_update = true;
                         }
                         update.write_u64::<LittleEndian>(0).unwrap();
                     },
                 }
             }
         }
-        for (component_id, (type_hash, serialize)) in registry.resource_serializers.iter() {
+        for (component_id, (type_hash, serialize)) in replication.resource_serializers.iter() {
             let resource_data = world.storages().resources.get(*component_id).unwrap();
             let resource = unsafe { resource_data.get_data().unwrap_unchecked() };
             /*let ticks = unsafe { resource_data.get_ticks().unwrap_unchecked() };
@@ -181,65 +202,56 @@ pub(crate) fn send_update(
             update.write_u64::<LittleEndian>(*type_hash).unwrap();
             let update_before = update.len();
             serialize(resource, &mut update);
-            if update_before != update.len() {
-                println!("Event type hash {type_hash}");
-                should_update = true;
-            } else {
+            if update_before == update.len() {
                 unsafe { update.set_len(update_before - 8) };
             }
         }
         update.write_u64::<LittleEndian>(0).unwrap();
 
-        update.write_u8(connection.added_entities.len() as u8).unwrap();
-        for (remote_entity, local_entity) in &connection.added_entities {
+        update.write_u8(connection.entities_added.len() as u8).unwrap();
+        for (remote_entity, local_entity) in &connection.entities_added {
             update.write_u64::<LittleEndian>(*remote_entity).unwrap();
             update.write_u64::<LittleEndian>(local_entity.to_bits()).unwrap();
-            println!("Add {remote_entity} {}", local_entity.to_bits());
-            should_update = true;
         }
-   
-        if should_update {
-            println!("Send {} bytes", update.len());
-            connection.message_tx.send(update).unwrap();
+
+        if update.len() == 9 {
+            continue;
         }
+        connection.message_tx.send(update).unwrap();
     }
 }
 
-pub(crate) fn recv_update(
+pub(crate) fn recv_updates(
     world: &mut World,
 ) {
     let unsafe_world_cell = world.as_unsafe_world_cell();
 
-    let registry = unsafe { unsafe_world_cell.get_resource::<Registry>() }.unwrap();
+    let replication = unsafe { unsafe_world_cell.get_resource::<Replication>() }.unwrap();
     let mut connections = unsafe { unsafe_world_cell.world_mut() }.query::<&mut Connection>();
     for mut connection in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
-        connection.added_entities.clear();
+        connection.entities_added.clear();
 
         while let Ok(update) = connection.message_rx.try_recv() {
             let mut update = update.as_slice();
-            println!("Recv {} bytes", update.len());
 
             let mut type_hash = update.read_u64::<LittleEndian>().unwrap();
-            println!("Recv type hash {type_hash}");
             while type_hash != 0 {
-                if let Some(deserialize) = registry.component_deserializers.get(&type_hash) {
+                if let Some(deserialize) = replication.component_deserializers.get(&type_hash) {
                     let mut entity = update.read_u64::<LittleEndian>().unwrap();
-                    println!("Recv entity {entity}");
                     while entity != 0 {
-                        let mut entity_world = if let Some(entity) = connection.entity_map.get(&entity) {
+                        let mut entity_world = if let Some(entity) = connection.entities.get(&entity) {
                             unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity)
                         } else {
                             let entity_world = unsafe { unsafe_world_cell.world_mut() }.spawn(());
-                            connection.entity_map.insert(entity, entity_world.id());
-                            connection.added_entities.push((entity, entity_world.id()));
+                            connection.entities.insert(entity, entity_world.id());
+                            connection.entities_added.push((entity, entity_world.id()));
                             entity_world
                         };
                         deserialize(&mut entity_world, &mut update);
 
                         entity = update.read_u64::<LittleEndian>().unwrap();
                     }
-                } else if let Some(deserialize) = registry.resource_deserializers.get(&type_hash) {
-                    println!("Recv event");
+                } else if let Some(deserialize) = replication.resource_deserializers.get(&type_hash) {
                     deserialize(unsafe { unsafe_world_cell.world_mut() }, &mut update);
                 }
 
@@ -249,8 +261,7 @@ pub(crate) fn recv_update(
             for _ in 0..update.read_u8().unwrap() {
                 let local_entity = update.read_u64::<LittleEndian>().unwrap();
                 let remote_entity = update.read_u64::<LittleEndian>().unwrap();
-                println!("Recv add entity {local_entity} {remote_entity}");
-                connection.entity_map.insert(remote_entity, Entity::from_bits(local_entity));
+                connection.entities.insert(remote_entity, Entity::from_bits(local_entity));
             }
         }
     }

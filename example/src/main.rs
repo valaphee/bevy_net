@@ -3,7 +3,7 @@ use std::f32::consts::FRAC_PI_2;
 
 use bevy::{log::LogPlugin, prelude::*};
 
-use bevy_net::{registry::AppExt, transport::{ClientPlugin, ServerPlugin}};
+use bevy_net::{replication::AppExt, transport::{ClientPlugin, ServerPlugin}};
 use freecam::{Freecam, FreecamPlugin};
 use serde::{Deserialize, Serialize};
 

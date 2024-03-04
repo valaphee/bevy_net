@@ -1,2 +1,2 @@
+pub mod replication;
 pub mod transport;
-pub mod registry;
