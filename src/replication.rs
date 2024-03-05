@@ -224,9 +224,7 @@ pub(crate) fn send_updates(
                                 unsafe { column.get_data_unchecked(archetype_entity.table_row()) };
                             let ticks =
                                 unsafe { column.get_ticks_unchecked(archetype_entity.table_row()) };
-                            if !ticks.is_added(change_tick.last_run(), change_tick.this_run())
-                                || !ticks.is_changed(change_tick.last_run(), change_tick.this_run())
-                            {
+                            if !ticks.is_changed(change_tick.last_run(), change_tick.this_run()) {
                                 // Not changed since last update, skip
                                 continue;
                             }
@@ -253,9 +251,7 @@ pub(crate) fn send_updates(
                                     .get_ticks(archetype_entity.id())
                                     .unwrap_unchecked()
                             };
-                            if !ticks.is_added(change_tick.last_run(), change_tick.this_run())
-                                || !ticks.is_changed(change_tick.last_run(), change_tick.this_run())
-                            {
+                            if !ticks.is_changed(change_tick.last_run(), change_tick.this_run()) {
                                 // Not changed since last update, skip
                                 continue;
                             }
