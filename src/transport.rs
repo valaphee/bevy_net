@@ -46,12 +46,7 @@ impl Plugin for ServerPlugin {
 
                         let (rx_message_tx, rx_message_rx) = mpsc::unbounded_channel();
                         let (tx_message_tx, mut tx_message_rx) = mpsc::unbounded_channel();
-                        let _ = new_connection_tx.send(Connection {
-                            message_rx: rx_message_rx,
-                            message_tx: tx_message_tx,
-                            entities: Default::default(),
-                            entities_added: Default::default(),
-                        });
+                        let _ = new_connection_tx.send(Connection::new(message_rx, message_tx));
 
                         tokio::spawn(async move {
                             loop {
@@ -81,9 +76,7 @@ impl Plugin for ServerPlugin {
             });
         };
 
-        app.add_systems(PostStartup, listen)
-            .add_systems(PreUpdate, (spawn_new_connections, recv_updates))
-            .add_systems(PostUpdate, send_updates);
+        app.add_systems(PostStartup, listen);
     }
 }
 
@@ -99,7 +92,7 @@ impl Plugin for ClientPlugin {
 
         let connect = move |mut commands: Commands| {
             let (new_connection_tx, new_connection_rx) = mpsc::unbounded_channel();
-            commands.insert_resource(NewConnectionRx(new_connection_rx));
+            commands.insert_resource(NewConnectionRx::new(new_connection_rx));
 
             tokio::spawn(async move {
                 info!("Connecting to {}", address);
@@ -111,12 +104,7 @@ impl Plugin for ClientPlugin {
 
                 let (rx_message_tx, rx_message_rx) = mpsc::unbounded_channel();
                 let (tx_message_tx, mut tx_message_rx) = mpsc::unbounded_channel();
-                let _ = new_connection_tx.send(Connection {
-                    message_rx: rx_message_rx,
-                    message_tx: tx_message_tx,
-                    entities: Default::default(),
-                    entities_added: Default::default(),
-                });
+                let _ = new_connection_tx.send(Connection::new(message_rx, message_tx));
 
                 tokio::spawn(async move {
                     loop {
@@ -144,9 +132,7 @@ impl Plugin for ClientPlugin {
             });
         };
 
-        app.add_systems(PostStartup, connect)
-            .add_systems(PreUpdate, (spawn_new_connections, recv_updates))
-            .add_systems(PostUpdate, send_updates);
+        app.add_systems(PostStartup, connect);
     }
 }
 

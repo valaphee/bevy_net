@@ -7,7 +7,7 @@ use std::{
 use bevy::{log::LogPlugin, prelude::*};
 
 use bevy_net::{
-    replication::AppExt,
+    replication::{AppExt, ReplicationPlugin},
     transport::{ClientPlugin, ServerPlugin},
 };
 use freecam::{Freecam, FreecamPlugin};
@@ -23,6 +23,7 @@ async fn main() {
     app.add_plugins((
         DefaultPlugins,
         FreecamPlugin,
+        ReplicationPlugin,
         ClientPlugin {
             address: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 13371).into(),
         },
@@ -39,6 +40,7 @@ async fn main() {
             Duration::from_secs_f64(1.0 / 20.0),
         )),
         LogPlugin::default(),
+        ReplicationPlugin,
         ServerPlugin {
             address: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 13371).into(),
         },
@@ -74,7 +76,12 @@ fn update_ball(time: Res<Time>, mut balls: Query<&mut BallPosition>) {
 #[cfg(feature = "server")]
 fn spawn_ball_server(mut commands: Commands, mut shoot_ball_events: EventReader<ShootBall>) {
     for event in shoot_ball_events.read() {
-        commands.spawn((Ball { color: event.color }, BallPosition { position: Vec3::ZERO}));
+        commands.spawn((
+            Ball { color: event.color },
+            BallPosition {
+                position: Vec3::ZERO,
+            },
+        ));
     }
 }
 
