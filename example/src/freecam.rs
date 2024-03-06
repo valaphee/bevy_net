@@ -1,6 +1,5 @@
 use bevy::prelude::*;
 
-#[derive(Default)]
 pub struct FreecamPlugin;
 
 impl Plugin for FreecamPlugin {

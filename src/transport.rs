@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
 use bevy::{
-    app::{App, Plugin, PostStartup, PostUpdate, PreUpdate},
+    app::{App, Plugin, PostStartup},
     ecs::system::Commands,
-    log::info,
+    log::{debug, info},
 };
 use futures::{SinkExt, StreamExt};
 use tokio::{
@@ -15,9 +15,7 @@ use tokio_util::{
     codec::{Decoder, Encoder, Framed},
 };
 
-use crate::replication::{
-    recv_updates, send_updates, spawn_new_connections, Connection, NewConnectionRx, Replication,
-};
+use crate::replication::{Connection, NewConnectionRx};
 
 pub struct ServerPlugin {
     pub address: SocketAddr,
@@ -26,12 +24,9 @@ pub struct ServerPlugin {
 impl Plugin for ServerPlugin {
     fn build(&self, app: &mut App) {
         let address = self.address;
-
-        app.init_resource::<Replication>();
-
         let listen = move |mut commands: Commands| {
             let (new_connection_tx, new_connection_rx) = mpsc::unbounded_channel();
-            commands.insert_resource(NewConnectionRx(new_connection_rx));
+            commands.insert_resource(NewConnectionRx::new(new_connection_rx));
 
             tokio::spawn(async move {
                 let listener = TcpListener::bind(address).await.unwrap();
@@ -39,26 +34,28 @@ impl Plugin for ServerPlugin {
                 info!("Listening on {}", address);
 
                 loop {
-                    if let Ok((stream, _address)) = listener.accept().await {
+                    if let Ok((stream, address)) = listener.accept().await {
+                        debug!("Accepting {}", address);
+
+                        let (rx_packet_tx, rx_packet_rx) = mpsc::unbounded_channel();
+                        let (tx_packet_tx, mut tx_packet_rx) = mpsc::unbounded_channel();
+                        new_connection_tx
+                            .send(Connection::new(rx_packet_rx, tx_packet_tx))
+                            .unwrap();
+
                         stream.set_nodelay(true).unwrap();
-
-                        let mut framed_stream = Framed::new(stream, LengthFieldCodec::default());
-
-                        let (rx_message_tx, rx_message_rx) = mpsc::unbounded_channel();
-                        let (tx_message_tx, mut tx_message_rx) = mpsc::unbounded_channel();
-                        let _ = new_connection_tx.send(Connection::new(message_rx, message_tx));
-
+                        let mut framed_stream = Framed::new(stream, LengthFieldCodec);
                         tokio::spawn(async move {
                             loop {
                                 tokio::select! {
                                     message = framed_stream.next() => {
                                         if let Some(Ok(message)) = message {
-                                            let _ = rx_message_tx.send(message);
+                                            let _ = rx_packet_tx.send(message);
                                         } else {
                                             break;
                                         }
                                     }
-                                    message = tx_message_rx.recv() => {
+                                    message = tx_packet_rx.recv() => {
                                         if let Some(message) = message {
                                             if framed_stream.send(message).await.is_err() {
                                                 break;
@@ -69,7 +66,8 @@ impl Plugin for ServerPlugin {
                                     }
                                 }
                             }
-                            tx_message_rx.close();
+                            tx_packet_rx.close();
+                            let _ = framed_stream.close().await;
                         });
                     }
                 }
@@ -87,9 +85,6 @@ pub struct ClientPlugin {
 impl Plugin for ClientPlugin {
     fn build(&self, app: &mut App) {
         let address = self.address;
-
-        app.init_resource::<Replication>();
-
         let connect = move |mut commands: Commands| {
             let (new_connection_tx, new_connection_rx) = mpsc::unbounded_channel();
             commands.insert_resource(NewConnectionRx::new(new_connection_rx));
@@ -97,26 +92,26 @@ impl Plugin for ClientPlugin {
             tokio::spawn(async move {
                 info!("Connecting to {}", address);
 
+                let (rx_packet_tx, rx_packet_rx) = mpsc::unbounded_channel();
+                let (tx_packet_tx, mut tx_packet_rx) = mpsc::unbounded_channel();
+                new_connection_tx
+                    .send(Connection::new(rx_packet_rx, tx_packet_tx))
+                    .unwrap();
+
                 let stream = TcpStream::connect(address).await.unwrap();
                 stream.set_nodelay(true).unwrap();
-
-                let mut framed_stream = Framed::new(stream, LengthFieldCodec::default());
-
-                let (rx_message_tx, rx_message_rx) = mpsc::unbounded_channel();
-                let (tx_message_tx, mut tx_message_rx) = mpsc::unbounded_channel();
-                let _ = new_connection_tx.send(Connection::new(message_rx, message_tx));
-
+                let mut framed_stream = Framed::new(stream, LengthFieldCodec);
                 tokio::spawn(async move {
                     loop {
                         tokio::select! {
                             message = framed_stream.next() => {
                                 if let Some(Ok(message)) = message {
-                                    let _ = rx_message_tx.send(message);
+                                    let _ = rx_packet_tx.send(message);
                                 } else {
                                     break;
                                 }
                             }
-                            message = tx_message_rx.recv() => {
+                            message = tx_packet_rx.recv() => {
                                 if let Some(message) = message {
                                     if framed_stream.send(message).await.is_err() {
                                         break;
@@ -127,7 +122,8 @@ impl Plugin for ClientPlugin {
                             }
                         }
                     }
-                    tx_message_rx.close();
+                    tx_packet_rx.close();
+                    let _ = framed_stream.close().await;
                 });
             });
         };
@@ -136,7 +132,6 @@ impl Plugin for ClientPlugin {
     }
 }
 
-#[derive(Default)]
 struct LengthFieldCodec;
 
 const MAX: usize = 8 * 1024 * 1024;

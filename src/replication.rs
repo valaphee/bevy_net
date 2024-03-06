@@ -4,7 +4,7 @@ use std::{
 };
 
 use bevy::{
-    app::App,
+    app::{App, Plugin, PostUpdate, PreUpdate},
     ecs::{
         component::{Component, ComponentId, StorageType},
         entity::Entity,
@@ -28,13 +28,10 @@ use tokio::sync::mpsc;
 ///
 /// For replication to work, it is also necessary to choose a transport plugin,
 /// as the replication plugin is only reponsible for generating the updates.
-#[derive(Default)]
 pub struct ReplicationPlugin;
 
 impl Plugin for ReplicationPlugin {
     fn build(&self, app: &mut App) {
-        let address = self.address;
-
         app.init_resource::<Replication>();
 
         app.add_systems(PreUpdate, (spawn_new_connections, recv_updates))
@@ -155,9 +152,9 @@ fn serialize_events<E: Event + Serialize>(
     // SAFETY: serialize_events is always supplied with the correct type (component
     // ids are unique).
     let events: &Events<E> = unsafe { events.deref() };
-    /// SAFETY: event_reader is the same size as last_event_count.
-    /// TODO: find safe method to initialize ManualEventReader at the right
-    /// position.
+    // SAFETY: event_reader is the same size as last_event_count.
+    // TODO: find safe method to initialize ManualEventReader at the right
+    // position.
     let event_reader: &mut ManualEventReader<E> = unsafe { std::mem::transmute(last_event_count) };
     let events = event_reader.read(events).collect::<Vec<_>>();
     if !events.is_empty() {
@@ -167,23 +164,20 @@ fn serialize_events<E: Event + Serialize>(
     }
 }
 
-fn deserialize_and_send_events<E: Event + DeserializeOwned>(
-    world: &mut World,
-    mut input: &mut &[u8],
-) {
+fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8]) {
     use bincode::{DefaultOptions, Options};
 
-    let events: Vec<E> = DefaultOptions::new().deserialize_from(&mut input).unwrap();
+    let events: Vec<E> = DefaultOptions::new().deserialize_from(input).unwrap();
     world.send_event_batch(events);
 }
 
 fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity: &mut EntityWorldMut,
-    mut input: &mut &[u8],
+    input: &mut &[u8],
 ) {
     use bincode::{DefaultOptions, Options};
 
-    let component: C = DefaultOptions::new().deserialize_from(&mut input).unwrap();
+    let component: C = DefaultOptions::new().deserialize_from(input).unwrap();
     entity.insert(component);
 }
 
@@ -274,8 +268,8 @@ fn send_updates(
         // Write all modified components, go through archetypes as some are stored in
         // tables
         for archetype in world.archetypes().iter() {
-            /// SAFETY: The archetype was obtained from this world and always
-            /// has an table.
+            // SAFETY: The archetype was obtained from this world and always
+            // has an table.
             let table = unsafe {
                 world
                     .storages()
@@ -294,23 +288,23 @@ fn send_updates(
                 update.write_u64::<LittleEndian>(*type_hash).unwrap();
 
                 let update_len = update.len();
-                /// SAFETY: The component was obtained from this archetype and
-                /// always has a storage type.
+                // SAFETY: The component was obtained from this archetype and
+                // always has a storage type.
                 let storage_type =
                     unsafe { archetype.get_storage_type(component_id).unwrap_unchecked() };
                 match storage_type {
                     StorageType::Table => {
-                        /// SAFETY: The storage type matches StorageType::Table
-                        /// and therefore is contained in the table of this
-                        /// archetype.
+                        // SAFETY: The storage type matches StorageType::Table
+                        // and therefore is contained in the table of this
+                        // archetype.
                         let column = unsafe { table.get_column(component_id).unwrap_unchecked() };
                         for archetype_entity in archetype.entities() {
-                            /// SAFETY: The entity is obtained from this
-                            /// archetype and therefore is contained in this
-                            /// archetypes table.
+                            // SAFETY: The entity is obtained from this
+                            // archetype and therefore is contained in this
+                            // archetypes table.
                             let component =
                                 unsafe { column.get_data_unchecked(archetype_entity.table_row()) };
-                            /// SAFETY: See above.
+                            // SAFETY: See above.
                             let ticks =
                                 unsafe { column.get_ticks_unchecked(archetype_entity.table_row()) };
                             if !ticks.is_changed(change_tick.last_run(), change_tick.this_run()) {
@@ -325,9 +319,9 @@ fn send_updates(
                         }
                     }
                     StorageType::SparseSet => {
-                        /// SAFETY: The storage type matches
-                        /// StorageType::SparseSet and therefore has a sparse
-                        /// set in this world.
+                        // SAFETY: The storage type matches
+                        // StorageType::SparseSet and therefore has a sparse
+                        // set in this world.
                         let sparse_set = unsafe {
                             world
                                 .storages()
@@ -336,12 +330,12 @@ fn send_updates(
                                 .unwrap_unchecked()
                         };
                         for archetype_entity in archetype.entities() {
-                            /// SAFETY: The entity is obtained from this
-                            /// archetype and therefore is contained in this
-                            /// archetypes components sparse set.
+                            // SAFETY: The entity is obtained from this
+                            // archetype and therefore is contained in this
+                            // archetypes components sparse set.
                             let component =
                                 unsafe { sparse_set.get(archetype_entity.id()).unwrap_unchecked() };
-                            /// SAFETY: See above.
+                            // SAFETY: See above.
                             let ticks = unsafe {
                                 sparse_set
                                     .get_ticks(archetype_entity.id())
