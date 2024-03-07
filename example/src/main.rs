@@ -8,7 +8,7 @@ use bevy::{log::LogPlugin, prelude::*};
 
 use bevy_net::{
     replication::{AppExt, ReplicationPlugin},
-    transport::webrtc::{ClientPlugin, ServerPlugin},
+    transport::{ClientPlugin, ServerPlugin},
 };
 use freecam::{Freecam, FreecamPlugin};
 use serde::{Deserialize, Serialize};
