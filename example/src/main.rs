@@ -45,6 +45,7 @@ async fn main() {
     .send_component::<Ball>()
     .send_component::<BallPosition>()
     .recv_event::<ShootBall>();
+
     app.add_systems(Update, update_ball).run();
 }
 

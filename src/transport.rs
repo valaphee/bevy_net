@@ -1,6 +1,9 @@
 use std::time::Duration;
 
-use bevy::{app::{App, Plugin, PostStartup}, ecs::system::Commands};
+use bevy::{
+    app::{App, Plugin, PostStartup},
+    ecs::system::Commands,
+};
 use tokio::sync::mpsc;
 use wtransport::{Certificate, ClientConfig, Endpoint, ServerConfig};
 
@@ -91,7 +94,7 @@ impl Plugin for ClientPlugin {
                 new_connection_tx
                     .send(Connection::new(rx_packet_rx, tx_packet_tx))
                     .unwrap();
-    
+
                 loop {
                     tokio::select! {
                         message = connection.receive_datagram() => {

@@ -1,25 +1,27 @@
 use std::{
     any::type_name,
     hash::{DefaultHasher, Hash, Hasher},
-    io::Write,
 };
 
 use bevy::{
     app::{App, Plugin, PostUpdate, PreUpdate},
     ecs::{
-        component::{Component, ComponentId, StorageType},
+        component::{Component, ComponentId},
         entity::Entity,
         event::{Event, Events, ManualEventReader},
-        removal_detection::{RemovedComponentEntity, RemovedComponentEvents},
-        system::{Commands, Local, Query, Res, ResMut, Resource, SystemChangeTick},
+        system::{Commands, ResMut, Resource},
         world::{EntityWorldMut, World},
     },
     ptr::Ptr,
     utils::HashMap,
 };
-use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use serde::{de::DeserializeOwned, Serialize};
 use tokio::sync::mpsc;
+
+use self::{recv::recv_updates, send::send_updates};
+
+mod recv;
+mod send;
 
 /// Allows for replication of components and events between multiple Bevy
 /// instances.
@@ -76,9 +78,13 @@ impl AppExt for App {
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication
-            .event_serializers
-            .insert(component_id, (type_hash, serialize_events::<E>));
+        replication.send_event_data.insert(
+            component_id,
+            SendEventData {
+                type_hash,
+                serializer: serialize_events::<E>,
+            },
+        );
 
         self
     }
@@ -115,9 +121,13 @@ impl AppExt for App {
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication
-            .component_serializers
-            .insert(component_id, (type_hash, serialize::<C>));
+        replication.send_component_data.insert(
+            component_id,
+            SendComponentData {
+                type_hash,
+                serializer: serialize::<C>,
+            },
+        );
 
         self
     }
@@ -131,12 +141,10 @@ impl AppExt for App {
 
         // Add deserializer (incl. handler) for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication
-            .component_deserializers
-            .insert(type_hash, deserialize_and_insert_component::<C>);
-        replication
-            .component_removers
-            .insert(type_hash, remove_component::<C>);
+        replication.component_deserializers_and_removers.insert(
+            type_hash,
+            (deserialize_and_insert_component::<C>, remove_component::<C>),
+        );
 
         self
     }
@@ -194,14 +202,32 @@ fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
     entity.remove::<C>();
 }
 
-/// Serializer, deserializers (incl. handlers) necessary for replication.
 #[derive(Resource, Default)]
 struct Replication {
-    event_serializers: HashMap<ComponentId, (u32, fn(Ptr, &mut Vec<u8>, &mut usize))>,
-    event_deserializers: HashMap<u32, fn(&mut World, &mut &[u8])>,
-    component_serializers: HashMap<ComponentId, (u32, fn(Ptr, &mut Vec<u8>))>,
-    component_deserializers: HashMap<u32, fn(&mut EntityWorldMut, &mut &[u8])>,
-    component_removers: HashMap<u32, fn(&mut EntityWorldMut)>,
+    send_event_data: HashMap<ComponentId, SendEventData>,
+    send_component_data: HashMap<ComponentId, SendComponentData>,
+    event_deserializers: HashMap<u32, EventDeserializer>,
+    component_deserializers_and_removers: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
+}
+
+type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
+
+type EventDeserializer = fn(&mut World, &mut &[u8]);
+
+type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
+
+type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
+
+type ComponentRemover = fn(&mut EntityWorldMut);
+
+struct SendEventData {
+    type_hash: u32,
+    serializer: EventSerializer,
+}
+
+struct SendComponentData {
+    type_hash: u32,
+    serializer: ComponentSerializer,
 }
 
 /// Receiver for receiving newly connected clients, which should be spawned.
@@ -223,11 +249,11 @@ pub struct Connection {
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
 
     /// All known remote entities
-    entities: HashMap<u32, Entity>,
+    entity_links: HashMap<u32, Entity>,
     /// All entities which have been added because of a component update. Needs
     /// to be sent to the remote, to create an association between those
     /// entities.
-    entities_added: Vec<(u32, Entity)>,
+    entity_links_new: Vec<(u32, Entity)>,
 }
 
 impl Connection {
@@ -239,8 +265,8 @@ impl Connection {
         Self {
             packet_rx,
             packet_tx,
-            entities: Default::default(),
-            entities_added: Default::default(),
+            entity_links: Default::default(),
+            entity_links_new: Default::default(),
         }
     }
 }
@@ -249,265 +275,5 @@ impl Connection {
 fn spawn_new_connections(mut commands: Commands, mut new_connection_rx: ResMut<NewConnectionRx>) {
     while let Ok(connection) = new_connection_rx.0.try_recv() {
         commands.spawn(connection);
-    }
-}
-
-/// Last send event count, needed to not send events multiple times.
-#[derive(Default)]
-struct EventReaders(HashMap<u32, usize>);
-
-/// Gathers and sends all updates.
-fn send_updates(
-    change_tick: SystemChangeTick,
-    mut event_readers: Local<EventReaders>,
-    mut component_remove_event_readers: Local<
-        HashMap<ComponentId, ManualEventReader<RemovedComponentEntity>>,
-    >,
-    world: &World,
-    replication: Res<Replication>,
-    connections: Query<&Connection>,
-    component_remove_events: &RemovedComponentEvents,
-) {
-    for connection in connections.iter() {
-        let mut update = Vec::new();
-
-        // Write all added entities, which are needed for properly associating entities
-        // between peers
-        update
-            .write_u8(connection.entities_added.len() as u8)
-            .unwrap();
-        for (remote_entity, local_entity) in &connection.entities_added {
-            update.write_u32::<LittleEndian>(*remote_entity).unwrap();
-            update
-                .write_u32::<LittleEndian>(local_entity.index())
-                .unwrap();
-        }
-
-        // Write all removed components.
-        for (component_id, (type_hash, _)) in &replication.component_serializers {
-            let Some(events) = component_remove_events.get(*component_id) else {
-                continue;
-            };
-            let event_reader = component_remove_event_readers
-                .entry(*component_id)
-                .or_default();
-
-            update.write_u32::<LittleEndian>(*type_hash).unwrap();
-            let update_len = update.len();
-
-            for event in event_reader.read(events).cloned() {
-                update
-                    .write_u32::<LittleEndian>(Entity::from(event).index())
-                    .unwrap();
-            }
-
-            // Check if any entity was written.
-            if update_len == update.len() {
-                // Drop type hash.
-                update.truncate(update_len - std::mem::size_of::<u32>());
-            } else {
-                // Null-terminated.
-                update.write_u32::<LittleEndian>(0).unwrap();
-            }
-        }
-
-        // Null-terminated.
-        update.write_u32::<LittleEndian>(0).unwrap();
-
-        // Write all components added/updated.
-        for archetype in world.archetypes().iter() {
-            // SAFETY: The archetype was obtained from this world and always
-            // has an table.
-            let table = unsafe {
-                world
-                    .storages()
-                    .tables
-                    .get(archetype.table_id())
-                    .unwrap_unchecked()
-            };
-            for component_id in archetype.components() {
-                let Some((type_hash, serialize)) =
-                    replication.component_serializers.get(&component_id)
-                else {
-                    // No serializer found, skip.
-                    continue;
-                };
-
-                update.write_u32::<LittleEndian>(*type_hash).unwrap();
-                let update_len = update.len();
-
-                // SAFETY: The component was obtained from this archetype and
-                // always has a storage type.
-                let storage_type =
-                    unsafe { archetype.get_storage_type(component_id).unwrap_unchecked() };
-                match storage_type {
-                    StorageType::Table => {
-                        // SAFETY: The storage type matches StorageType::Table
-                        // and therefore is contained in the table of this
-                        // archetype.
-                        let column = unsafe { table.get_column(component_id).unwrap_unchecked() };
-                        for archetype_entity in archetype.entities() {
-                            // SAFETY: The entity is obtained from this
-                            // archetype and therefore is contained in this
-                            // archetypes table.
-                            let component =
-                                unsafe { column.get_data_unchecked(archetype_entity.table_row()) };
-                            // SAFETY: See above.
-                            let ticks =
-                                unsafe { column.get_ticks_unchecked(archetype_entity.table_row()) };
-                            if !ticks.is_changed(change_tick.last_run(), change_tick.this_run()) {
-                                // Not changed since last update, skip.
-                                continue;
-                            }
-
-                            update
-                                .write_u32::<LittleEndian>(archetype_entity.id().index())
-                                .unwrap();
-                            serialize(component, &mut update);
-                        }
-                    }
-                    StorageType::SparseSet => {
-                        // SAFETY: The storage type matches
-                        // StorageType::SparseSet and therefore has a sparse
-                        // set in this world.
-                        let sparse_set = unsafe {
-                            world
-                                .storages()
-                                .sparse_sets
-                                .get(component_id)
-                                .unwrap_unchecked()
-                        };
-                        for archetype_entity in archetype.entities() {
-                            // SAFETY: The entity is obtained from this
-                            // archetype and therefore is contained in this
-                            // archetypes components sparse set.
-                            let component =
-                                unsafe { sparse_set.get(archetype_entity.id()).unwrap_unchecked() };
-                            // SAFETY: See above.
-                            let ticks = unsafe {
-                                sparse_set
-                                    .get_ticks(archetype_entity.id())
-                                    .unwrap_unchecked()
-                            };
-                            if !ticks.is_changed(change_tick.last_run(), change_tick.this_run()) {
-                                // Not changed since last update, skip.
-                                continue;
-                            }
-
-                            update
-                                .write_u32::<LittleEndian>(archetype_entity.id().index())
-                                .unwrap();
-                            serialize(component, &mut update);
-                        }
-                    }
-                }
-
-                // Check if any component was written.
-                if update_len == update.len() {
-                    // Drop type hash.
-                    update.truncate(update_len - std::mem::size_of::<u32>());
-                } else {
-                    // Null-terminated.
-                    update.write_u32::<LittleEndian>(0).unwrap();
-                }
-            }
-        }
-
-        // Write all events.
-        for (component_id, (type_hash, serialize)) in replication.event_serializers.iter() {
-            update.write_u32::<LittleEndian>(*type_hash).unwrap();
-
-            let resource_data = world.storages().resources.get(*component_id).unwrap();
-            let resource = unsafe { resource_data.get_data().unwrap_unchecked() };
-
-            let update_len = update.len();
-            let last_event_count = event_readers.0.entry(*type_hash).or_default();
-            serialize(resource, &mut update, last_event_count);
-
-            // Check if resource is empty.
-            if update_len == update.len() {
-                // Drop type hash.
-                update.truncate(update_len - std::mem::size_of::<u32>());
-            }
-        }
-
-        // Null-terminated.
-        update.write_u32::<LittleEndian>(0).unwrap();
-
-        // Skip if update is empty.
-        // TODO: Remove magic number
-        if update.len() == 1 + 4 + 4 {
-            continue;
-        }
-        connection.packet_tx.send(update).unwrap();
-    }
-}
-
-/// Processes all incoming updates.
-fn recv_updates(world: &mut World) {
-    let unsafe_world_cell = world.as_unsafe_world_cell();
-
-    let replication = unsafe { unsafe_world_cell.get_resource::<Replication>() }.unwrap();
-    let mut connections = unsafe { unsafe_world_cell.world_mut() }.query::<&mut Connection>();
-    for mut connection in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
-        // Clear out entities added.
-        connection.entities_added.clear();
-
-        while let Ok(update) = connection.packet_rx.try_recv() {
-            let mut update = update.as_slice();
-
-            // Read entities added.
-            for _ in 0..update.read_u8().unwrap() {
-                let local_entity = update.read_u32::<LittleEndian>().unwrap();
-                let remote_entity = update.read_u32::<LittleEndian>().unwrap();
-                connection
-                    .entities
-                    .insert(remote_entity, Entity::from_raw(local_entity));
-            }
-
-            // Read entities/components removed.
-            let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
-            while type_hash != 0 {
-                if let Some(remove) = replication.component_removers.get(&type_hash) {
-                    let mut entity = update.read_u32::<LittleEndian>().unwrap();
-                    while entity != 0 {
-                        if let Some(entity) = connection.entities.get(&entity) {
-                            let mut entity_world =
-                                unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity);
-                            remove(&mut entity_world);
-                        }
-                        entity = update.read_u32::<LittleEndian>().unwrap();
-                    }
-                }
-                type_hash = update.read_u32::<LittleEndian>().unwrap();
-            }
-
-            // Read components added/updated and events.
-            let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
-            while type_hash != 0 {
-                if let Some(deserialize) = replication.component_deserializers.get(&type_hash) {
-                    let mut entity = update.read_u32::<LittleEndian>().unwrap();
-                    while entity != 0 {
-                        let mut entity_world = if let Some(entity) =
-                            connection.entities.get(&entity)
-                        {
-                            unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity)
-                        } else {
-                            let entity_world = unsafe { unsafe_world_cell.world_mut() }.spawn(());
-                            connection.entities.insert(entity, entity_world.id());
-                            connection.entities_added.push((entity, entity_world.id()));
-                            entity_world
-                        };
-                        deserialize(&mut entity_world, &mut update);
-
-                        entity = update.read_u32::<LittleEndian>().unwrap();
-                    }
-                } else if let Some(deserialize) = replication.event_deserializers.get(&type_hash) {
-                    deserialize(unsafe { unsafe_world_cell.world_mut() }, &mut update);
-                }
-
-                type_hash = update.read_u32::<LittleEndian>().unwrap();
-            }
-        }
     }
 }
