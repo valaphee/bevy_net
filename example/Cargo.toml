@@ -21,7 +21,7 @@ client = [
     "bevy/ktx2",
     "bevy/zstd",
     "bevy/tonemapping_luts",
-    "bevy/x11",
+    "bevy/wayland"
 ]
 server = [
     "bevy/bevy_color"

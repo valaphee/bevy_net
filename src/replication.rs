@@ -1,6 +1,7 @@
 use std::{
     any::type_name,
     hash::{DefaultHasher, Hash, Hasher},
+    io::Write,
 };
 
 use bevy::{
@@ -9,6 +10,7 @@ use bevy::{
         component::{Component, ComponentId, StorageType},
         entity::Entity,
         event::{Event, Events, ManualEventReader},
+        removal_detection::{RemovedComponentEntity, RemovedComponentEvents},
         system::{Commands, Local, Query, Res, ResMut, Resource, SystemChangeTick},
         world::{EntityWorldMut, World},
     },
@@ -244,11 +246,15 @@ struct EventReaders(HashMap<u64, usize>);
 
 /// Gathers and sends all updates.
 fn send_updates(
-    world: &World,
     change_tick: SystemChangeTick,
+    mut event_readers: Local<EventReaders>,
+    mut component_remove_event_readers: Local<
+        HashMap<ComponentId, ManualEventReader<RemovedComponentEntity>>,
+    >,
+    world: &World,
     replication: Res<Replication>,
     connections: Query<&Connection>,
-    mut event_readers: Local<EventReaders>,
+    component_remove_events: &RemovedComponentEvents,
 ) {
     for connection in connections.iter() {
         let mut update = Vec::new();
@@ -385,6 +391,15 @@ fn send_updates(
 
         // Null-terminated.
         update.write_u64::<LittleEndian>(0).unwrap();
+
+        for (component_id, _) in &replication.component_serializers {
+            let Some(events) = component_remove_events.get(*component_id) else {
+                continue;
+            };
+            let event_reader = component_remove_event_readers
+                .entry(*component_id)
+                .or_default();
+        }
 
         // Skip if update is empty.
         // TODO: Remove magic number

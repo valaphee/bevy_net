@@ -8,7 +8,7 @@ use bevy::{log::LogPlugin, prelude::*};
 
 use bevy_net::{
     replication::{AppExt, ReplicationPlugin},
-    transport::{ClientPlugin, ServerPlugin},
+    transport::webrtc::{ClientPlugin, ServerPlugin},
 };
 use freecam::{Freecam, FreecamPlugin};
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,7 @@ async fn main() {
         DefaultPlugins,
         FreecamPlugin,
         ReplicationPlugin,
-        ClientPlugin {
-            address: SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 13371).into(),
-        },
+        ClientPlugin,
     ))
     .add_systems(Startup, setup)
     .add_systems(Update, (spawn_ball_client, shoot_ball, sync_ball))
@@ -41,9 +39,7 @@ async fn main() {
         )),
         LogPlugin::default(),
         ReplicationPlugin,
-        ServerPlugin {
-            address: SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), 13371).into(),
-        },
+        ServerPlugin,
     ))
     .add_systems(Update, spawn_ball_server)
     .send_component::<Ball>()
