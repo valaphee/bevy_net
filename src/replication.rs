@@ -72,6 +72,7 @@ impl AppExt for App {
         let mut hasher = DefaultHasher::new();
         type_name::<E>().hash(&mut hasher);
         let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
@@ -91,6 +92,7 @@ impl AppExt for App {
         let mut hasher = DefaultHasher::new();
         type_name::<E>().hash(&mut hasher);
         let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
 
         // Add deserializer (incl. handler) for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
@@ -109,6 +111,7 @@ impl AppExt for App {
         let mut hasher = DefaultHasher::new();
         type_name::<C>().hash(&mut hasher);
         let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
@@ -124,12 +127,16 @@ impl AppExt for App {
         let mut hasher = DefaultHasher::new();
         type_name::<C>().hash(&mut hasher);
         let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
 
         // Add deserializer (incl. handler) for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
         replication
             .component_deserializers
             .insert(type_hash, deserialize_and_insert_component::<C>);
+        replication
+            .component_removers
+            .insert(type_hash, remove_component::<C>);
 
         self
     }
@@ -183,13 +190,18 @@ fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity.insert(component);
 }
 
+fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
+    entity.remove::<C>();
+}
+
 /// Serializer, deserializers (incl. handlers) necessary for replication.
 #[derive(Resource, Default)]
 struct Replication {
-    event_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>, &mut usize))>,
-    event_deserializers: HashMap<u64, fn(&mut World, &mut &[u8])>,
-    component_serializers: HashMap<ComponentId, (u64, fn(Ptr, &mut Vec<u8>))>,
-    component_deserializers: HashMap<u64, fn(&mut EntityWorldMut, &mut &[u8])>,
+    event_serializers: HashMap<ComponentId, (u32, fn(Ptr, &mut Vec<u8>, &mut usize))>,
+    event_deserializers: HashMap<u32, fn(&mut World, &mut &[u8])>,
+    component_serializers: HashMap<ComponentId, (u32, fn(Ptr, &mut Vec<u8>))>,
+    component_deserializers: HashMap<u32, fn(&mut EntityWorldMut, &mut &[u8])>,
+    component_removers: HashMap<u32, fn(&mut EntityWorldMut)>,
 }
 
 /// Receiver for receiving newly connected clients, which should be spawned.
@@ -211,11 +223,11 @@ pub struct Connection {
     packet_tx: mpsc::UnboundedSender<Vec<u8>>,
 
     /// All known remote entities
-    entities: HashMap<u64, Entity>,
+    entities: HashMap<u32, Entity>,
     /// All entities which have been added because of a component update. Needs
     /// to be sent to the remote, to create an association between those
     /// entities.
-    entities_added: Vec<(u64, Entity)>,
+    entities_added: Vec<(u32, Entity)>,
 }
 
 impl Connection {
@@ -242,7 +254,7 @@ fn spawn_new_connections(mut commands: Commands, mut new_connection_rx: ResMut<N
 
 /// Last send event count, needed to not send events multiple times.
 #[derive(Default)]
-struct EventReaders(HashMap<u64, usize>);
+struct EventReaders(HashMap<u32, usize>);
 
 /// Gathers and sends all updates.
 fn send_updates(
@@ -265,14 +277,44 @@ fn send_updates(
             .write_u8(connection.entities_added.len() as u8)
             .unwrap();
         for (remote_entity, local_entity) in &connection.entities_added {
-            update.write_u64::<LittleEndian>(*remote_entity).unwrap();
+            update.write_u32::<LittleEndian>(*remote_entity).unwrap();
             update
-                .write_u64::<LittleEndian>(local_entity.to_bits())
+                .write_u32::<LittleEndian>(local_entity.index())
                 .unwrap();
         }
 
-        // Write all modified components, go through archetypes as some are stored in
-        // tables
+        // Write all removed components.
+        for (component_id, (type_hash, _)) in &replication.component_serializers {
+            let Some(events) = component_remove_events.get(*component_id) else {
+                continue;
+            };
+            let event_reader = component_remove_event_readers
+                .entry(*component_id)
+                .or_default();
+
+            update.write_u32::<LittleEndian>(*type_hash).unwrap();
+            let update_len = update.len();
+
+            for event in event_reader.read(events).cloned() {
+                update
+                    .write_u32::<LittleEndian>(Entity::from(event).index())
+                    .unwrap();
+            }
+
+            // Check if any entity was written.
+            if update_len == update.len() {
+                // Drop type hash.
+                update.truncate(update_len - std::mem::size_of::<u32>());
+            } else {
+                // Null-terminated.
+                update.write_u32::<LittleEndian>(0).unwrap();
+            }
+        }
+
+        // Null-terminated.
+        update.write_u32::<LittleEndian>(0).unwrap();
+
+        // Write all components added/updated.
         for archetype in world.archetypes().iter() {
             // SAFETY: The archetype was obtained from this world and always
             // has an table.
@@ -291,9 +333,9 @@ fn send_updates(
                     continue;
                 };
 
-                update.write_u64::<LittleEndian>(*type_hash).unwrap();
-
+                update.write_u32::<LittleEndian>(*type_hash).unwrap();
                 let update_len = update.len();
+
                 // SAFETY: The component was obtained from this archetype and
                 // always has a storage type.
                 let storage_type =
@@ -319,7 +361,7 @@ fn send_updates(
                             }
 
                             update
-                                .write_u64::<LittleEndian>(archetype_entity.id().to_bits())
+                                .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
                             serialize(component, &mut update);
                         }
@@ -353,7 +395,7 @@ fn send_updates(
                             }
 
                             update
-                                .write_u64::<LittleEndian>(archetype_entity.id().to_bits())
+                                .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
                             serialize(component, &mut update);
                         }
@@ -363,17 +405,17 @@ fn send_updates(
                 // Check if any component was written.
                 if update_len == update.len() {
                     // Drop type hash.
-                    update.truncate(update_len - 8);
+                    update.truncate(update_len - std::mem::size_of::<u32>());
                 } else {
                     // Null-terminated.
-                    update.write_u64::<LittleEndian>(0).unwrap();
+                    update.write_u32::<LittleEndian>(0).unwrap();
                 }
             }
         }
 
         // Write all events.
         for (component_id, (type_hash, serialize)) in replication.event_serializers.iter() {
-            update.write_u64::<LittleEndian>(*type_hash).unwrap();
+            update.write_u32::<LittleEndian>(*type_hash).unwrap();
 
             let resource_data = world.storages().resources.get(*component_id).unwrap();
             let resource = unsafe { resource_data.get_data().unwrap_unchecked() };
@@ -385,25 +427,16 @@ fn send_updates(
             // Check if resource is empty.
             if update_len == update.len() {
                 // Drop type hash.
-                update.truncate(update_len - 8);
+                update.truncate(update_len - std::mem::size_of::<u32>());
             }
         }
 
         // Null-terminated.
-        update.write_u64::<LittleEndian>(0).unwrap();
-
-        for (component_id, _) in &replication.component_serializers {
-            let Some(events) = component_remove_events.get(*component_id) else {
-                continue;
-            };
-            let event_reader = component_remove_event_readers
-                .entry(*component_id)
-                .or_default();
-        }
+        update.write_u32::<LittleEndian>(0).unwrap();
 
         // Skip if update is empty.
         // TODO: Remove magic number
-        if update.len() == 9 {
+        if update.len() == 1 + 4 + 4 {
             continue;
         }
         connection.packet_tx.send(update).unwrap();
@@ -425,18 +458,35 @@ fn recv_updates(world: &mut World) {
 
             // Read entities added.
             for _ in 0..update.read_u8().unwrap() {
-                let local_entity = update.read_u64::<LittleEndian>().unwrap();
-                let remote_entity = update.read_u64::<LittleEndian>().unwrap();
+                let local_entity = update.read_u32::<LittleEndian>().unwrap();
+                let remote_entity = update.read_u32::<LittleEndian>().unwrap();
                 connection
                     .entities
-                    .insert(remote_entity, Entity::from_bits(local_entity));
+                    .insert(remote_entity, Entity::from_raw(local_entity));
             }
 
-            // Read data.
-            let mut type_hash = update.read_u64::<LittleEndian>().unwrap();
+            // Read entities/components removed.
+            let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
+            while type_hash != 0 {
+                if let Some(remove) = replication.component_removers.get(&type_hash) {
+                    let mut entity = update.read_u32::<LittleEndian>().unwrap();
+                    while entity != 0 {
+                        if let Some(entity) = connection.entities.get(&entity) {
+                            let mut entity_world =
+                                unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity);
+                            remove(&mut entity_world);
+                        }
+                        entity = update.read_u32::<LittleEndian>().unwrap();
+                    }
+                }
+                type_hash = update.read_u32::<LittleEndian>().unwrap();
+            }
+
+            // Read components added/updated and events.
+            let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
             while type_hash != 0 {
                 if let Some(deserialize) = replication.component_deserializers.get(&type_hash) {
-                    let mut entity = update.read_u64::<LittleEndian>().unwrap();
+                    let mut entity = update.read_u32::<LittleEndian>().unwrap();
                     while entity != 0 {
                         let mut entity_world = if let Some(entity) =
                             connection.entities.get(&entity)
@@ -450,13 +500,13 @@ fn recv_updates(world: &mut World) {
                         };
                         deserialize(&mut entity_world, &mut update);
 
-                        entity = update.read_u64::<LittleEndian>().unwrap();
+                        entity = update.read_u32::<LittleEndian>().unwrap();
                     }
                 } else if let Some(deserialize) = replication.event_deserializers.get(&type_hash) {
                     deserialize(unsafe { unsafe_world_cell.world_mut() }, &mut update);
                 }
 
-                type_hash = update.read_u64::<LittleEndian>().unwrap();
+                type_hash = update.read_u32::<LittleEndian>().unwrap();
             }
         }
     }
