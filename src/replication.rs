@@ -15,24 +15,13 @@ use bevy::{
     ptr::Ptr,
     utils::HashMap,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::sync::mpsc;
 
 use self::{recv::recv_updates, send::send_updates};
 
 mod recv;
 mod send;
-
-#[derive(Event)]
-pub struct Received<E: Event> {
-    pub source: Entity,
-    pub event: E,
-}
-
-pub struct Directed<E: Event> {
-    pub target: Entity,
-    pub event: E,
-}
 
 /// Allows for replication of components and events between multiple Bevy
 /// instances.
@@ -272,6 +261,17 @@ fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
     entity.remove::<C>();
 }
 
+#[derive(Event)]
+pub struct Received<E: Event> {
+    pub source: Entity,
+    pub event: E,
+}
+
+pub struct Directed<E: Event> {
+    pub target: Entity,
+    pub event: E,
+}
+
 #[derive(Resource, Default)]
 struct Replication {
     send_resource_data: HashMap<ComponentId, SendResourceData>,
@@ -331,10 +331,6 @@ pub struct Connection {
 
     /// All known remote entities
     entity_links: HashMap<u32, Entity>,
-    /// All entities which have been added because of a component update. Needs
-    /// to be sent to the remote, to create an association between those
-    /// entities.
-    entity_links_new: Vec<(u32, Entity)>,
 }
 
 impl Connection {
@@ -347,7 +343,6 @@ impl Connection {
             packet_rx,
             packet_tx,
             entity_links: Default::default(),
-            entity_links_new: Default::default(),
         }
     }
 }
@@ -357,4 +352,10 @@ fn spawn_new_connections(mut commands: Commands, mut new_connection_rx: ResMut<N
     while let Ok(connection) = new_connection_rx.0.try_recv() {
         commands.spawn(connection);
     }
+}
+
+#[derive(Event, Serialize, Deserialize)]
+struct LinkEntityEvent {
+    remote: u32,
+    local: Entity,
 }

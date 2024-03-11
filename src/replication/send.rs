@@ -35,17 +35,6 @@ pub(super) fn send_updates(
     for connection in connections.iter() {
         let mut update = Vec::new();
 
-        // Write all entity links.
-        update
-            .write_u8(connection.entity_links_new.len() as u8)
-            .unwrap();
-        for (remote_entity, local_entity) in &connection.entity_links_new {
-            update.write_u32::<LittleEndian>(*remote_entity).unwrap();
-            update
-                .write_u32::<LittleEndian>(local_entity.index())
-                .unwrap();
-        }
-
         // Write all resources.
         for (component_id, send_resource_data) in replication.send_resource_data.iter() {
             let resource_data = world.storages().resources.get(*component_id).unwrap();
@@ -115,9 +104,6 @@ pub(super) fn send_updates(
                 update.write_u32::<LittleEndian>(0).unwrap();
             }
         }
-
-        // Null-terminated.
-        update.write_u32::<LittleEndian>(0).unwrap();
 
         // Write all components added/updated.
         for archetype in world.archetypes().iter() {
