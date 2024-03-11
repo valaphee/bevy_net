@@ -23,6 +23,17 @@ use self::{recv::recv_updates, send::send_updates};
 mod recv;
 mod send;
 
+#[derive(Event)]
+pub struct Received<E: Event> {
+    pub sender: Entity,
+    pub event: E,
+}
+
+pub struct Directed<E: Event> {
+    pub receiver: Entity,
+    pub event: E,
+}
+
 /// Allows for replication of components and events between multiple Bevy
 /// instances.
 ///
@@ -136,7 +147,7 @@ impl AppExt for App {
     fn recv_event<E: Event + DeserializeOwned>(&mut self) -> &mut Self {
         // Add event. No component id is required as the event should be added to the
         // collection by the deserializer (it also acts as an handler).
-        self.add_event::<E>();
+        self.add_event::<Received<E>>();
 
         // Generate a hash to uniquly identitfy events of this type across instances.
         let mut hasher = DefaultHasher::new();
@@ -235,11 +246,16 @@ fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
     world.insert_resource(resource);
 }
 
-fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8]) {
+fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8], connection: Entity) {
     use bincode::{DefaultOptions, Options};
 
     let events: Vec<E> = DefaultOptions::new().deserialize_from(input).unwrap();
-    world.send_event_batch(events);
+    world.send_event_batch(events.into_iter().map(|event| {
+        Received {
+            sender: connection,
+            event,
+        }
+    }));
 }
 
 fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
@@ -272,7 +288,7 @@ type ResourceDeserializer = fn(&mut World, &mut &[u8]);
 
 type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
 
-type EventDeserializer = fn(&mut World, &mut &[u8]);
+type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
 
 type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
 

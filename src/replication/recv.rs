@@ -8,8 +8,8 @@ pub(super) fn recv_updates(world: &mut World) {
     let unsafe_world_cell = world.as_unsafe_world_cell();
 
     let replication = unsafe { unsafe_world_cell.get_resource::<Replication>() }.unwrap();
-    let mut connections = unsafe { unsafe_world_cell.world_mut() }.query::<&mut Connection>();
-    for mut connection in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
+    let mut connections = unsafe { unsafe_world_cell.world_mut() }.query::<(Entity, &mut Connection)>();
+    for (entity, mut connection) in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
         // Clear out new entity links.
         connection.entity_links_new.clear();
 
@@ -31,7 +31,7 @@ pub(super) fn recv_updates(world: &mut World) {
                 if let Some(deserializer) = replication.resource_deserializers.get(&type_hash) {
                     deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update);
                 } else if let Some(deserializer) = replication.event_deserializers.get(&type_hash) {
-                    deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update);
+                    deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update, entity);
                 } else if let Some((_, remover)) = replication
                     .component_deserializers_and_removers
                     .get(&type_hash)
