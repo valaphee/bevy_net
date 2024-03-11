@@ -44,6 +44,10 @@ impl Plugin for ReplicationPlugin {
 }
 
 pub trait AppExt {
+    fn send_resource<R: Resource + Serialize>(&mut self) -> &mut Self;
+
+    fn recv_resource<R: Resource + DeserializeOwned>(&mut self) -> &mut Self;
+
     // Sets up the event for sending, when new events arrive.
     fn send_event<E: Event + Serialize>(&mut self) -> &mut Self;
 
@@ -59,6 +63,46 @@ pub trait AppExt {
 }
 
 impl AppExt for App {
+    fn send_resource<R: Resource + Serialize>(&mut self) -> &mut Self {
+        // Add resource and get component id.
+        let component_id = self.world.components().resource_id::<R>().unwrap();
+
+        // Generate a hash to uniquly identitfy resources of this type across instances.
+        let mut hasher = DefaultHasher::new();
+        type_name::<R>().hash(&mut hasher);
+        let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
+
+        // Add serializer for the given component id.
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.send_resource_data.insert(
+            component_id,
+            SendResourceData {
+                type_hash,
+                serializer: serialize::<R>,
+            },
+        );
+
+        self
+    }
+
+    fn recv_resource<R: Resource + DeserializeOwned>(&mut self) -> &mut Self {
+        // Generate a hash to uniquly identitfy resources of this type across instances.
+        let mut hasher = DefaultHasher::new();
+        type_name::<R>().hash(&mut hasher);
+        let type_hash = hasher.finish();
+        let type_hash = type_hash as u32 ^ (type_hash >> 32) as u32;
+
+        // Add deserializer (incl. handler) for the given resource id.
+        let mut replication = self.world.resource_mut::<Replication>();
+        replication.resource_deserializers.insert(
+            type_hash,
+            deserialize_and_insert_resource::<R>,
+        );
+
+        self
+    }
+
     fn send_event<E: Event + Serialize>(&mut self) -> &mut Self {
         // Add event and get component id of the event collection.
         self.add_event::<E>();
@@ -181,6 +225,16 @@ fn serialize_events<E: Event + Serialize>(
     }
 }
 
+fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
+    world: &mut World,
+    input: &mut &[u8],
+) {
+    use bincode::{DefaultOptions, Options};
+
+    let resource: R = DefaultOptions::new().deserialize_from(input).unwrap();
+    world.insert_resource(resource);
+}
+
 fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8]) {
     use bincode::{DefaultOptions, Options};
 
@@ -204,11 +258,17 @@ fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
 
 #[derive(Resource, Default)]
 struct Replication {
+    send_resource_data: HashMap<ComponentId, SendResourceData>,
     send_event_data: HashMap<ComponentId, SendEventData>,
     send_component_data: HashMap<ComponentId, SendComponentData>,
+    resource_deserializers: HashMap<u32, ResourceDeserializer>,
     event_deserializers: HashMap<u32, EventDeserializer>,
     component_deserializers_and_removers: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
 }
+
+type ResourceSerializer = fn(Ptr, &mut Vec<u8>);
+
+type ResourceDeserializer = fn(&mut World, &mut &[u8]);
 
 type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
 
@@ -219,6 +279,11 @@ type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
 type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
 
 type ComponentRemover = fn(&mut EntityWorldMut);
+
+struct SendResourceData {
+    type_hash: u32,
+    serializer: ResourceSerializer,
+}
 
 struct SendEventData {
     type_hash: u32,

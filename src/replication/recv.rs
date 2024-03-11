@@ -28,7 +28,9 @@ pub(super) fn recv_updates(world: &mut World) {
             // Read all events.
             let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
             while type_hash != 0 {
-                if let Some(deserializer) = replication.event_deserializers.get(&type_hash) {
+                if let Some(deserializer) = replication.resource_deserializers.get(&type_hash) {
+                    deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update);
+                } else if let Some(deserializer) = replication.event_deserializers.get(&type_hash) {
                     deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update);
                 } else if let Some((_, remover)) = replication
                     .component_deserializers_and_removers

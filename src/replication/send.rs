@@ -46,6 +46,24 @@ pub(super) fn send_updates(
                 .unwrap();
         }
 
+        // Write all resources.
+        for (component_id, send_resource_data) in replication.send_resource_data.iter() {
+            let resource_data = world.storages().resources.get(*component_id).unwrap();
+            let resource = unsafe { resource_data.get_data().unwrap_unchecked() };
+
+            update
+                .write_u32::<LittleEndian>(send_resource_data.type_hash)
+                .unwrap();
+            let update_pos = update.len();
+            (send_resource_data.serializer)(resource, &mut update);
+
+            // Check if any event was written.
+            if update_pos == update.len() {
+                // Drop type hash.
+                update.truncate(update_pos - std::mem::size_of::<u32>());
+            }
+        }
+
         // Write all events.
         for (component_id, send_event_data) in replication.send_event_data.iter() {
             let resource_data = world.storages().resources.get(*component_id).unwrap();
