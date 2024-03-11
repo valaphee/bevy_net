@@ -140,7 +140,7 @@ pub(super) fn send_updates(
                 update
                     .write_u32::<LittleEndian>(send_component_data.type_hash)
                     .unwrap();
-                let update_pos = update.len();
+                let mut update_pos = update.len();
 
                 // SAFETY: The component was obtained from this archetype and
                 // always has a storage type.
@@ -166,10 +166,31 @@ pub(super) fn send_updates(
                                 continue;
                             }
 
+                            let update_pos_inner = update.len();
                             update
                                 .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
                             (send_component_data.serializer)(component, &mut update);
+
+                            if update.len() > 1346 {
+                                {
+                                    let mut update_ow = &mut update[update_pos_inner..][..4];
+                                    update_ow.write_u32::<LittleEndian>(0);
+                                }
+                                connection.packet_tx.send(update.clone()).unwrap();
+                                update.clear();
+                                update.write_u8(0);
+                                update.write_u32::<LittleEndian>(0);
+
+                                update
+                                    .write_u32::<LittleEndian>(send_component_data.type_hash)
+                                    .unwrap();
+                                update_pos = update.len();
+                                update
+                                    .write_u32::<LittleEndian>(archetype_entity.id().index())
+                                    .unwrap();
+                                (send_component_data.serializer)(component, &mut update);
+                            }
                         }
                     }
                     StorageType::SparseSet => {
@@ -200,10 +221,31 @@ pub(super) fn send_updates(
                                 continue;
                             }
 
+                            let update_pos_inner = update.len();
                             update
                                 .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
                             (send_component_data.serializer)(component, &mut update);
+
+                            if update.len() > 1346 {
+                                {
+                                    let mut update_ow = &mut update[update_pos_inner..][..4];
+                                    update_ow.write_u32::<LittleEndian>(0);
+                                }
+                                connection.packet_tx.send(update.clone()).unwrap();
+                                update.clear();
+                                update.write_u8(0);
+                                update.write_u32::<LittleEndian>(0);
+
+                                update
+                                    .write_u32::<LittleEndian>(send_component_data.type_hash)
+                                    .unwrap();
+                                update_pos = update.len();
+                                update
+                                    .write_u32::<LittleEndian>(archetype_entity.id().index())
+                                    .unwrap();
+                                (send_component_data.serializer)(component, &mut update);
+                            }
                         }
                     }
                 }

@@ -85,7 +85,7 @@ fn spawn_ball_server(mut commands: Commands, time: Res<Time>,
         hello.test = time.elapsed_seconds() as u32;
    
     for event in shoot_ball_events.read() {
-        println!("{:?}", event.sender);
+        println!("{:?}", event.source);
         commands.spawn((
             Ball { color: event.event.color },
             BallPosition {
@@ -96,7 +96,7 @@ fn spawn_ball_server(mut commands: Commands, time: Res<Time>,
 }
 
 #[cfg(feature = "client")]
-fn setup(mut commands: Commands) {
+fn setup(mut commands: Commands, client: Res<bevy_net::transport::Client>) {
     commands.spawn(PointLightBundle {
         point_light: PointLight {
             shadows_enabled: true,
@@ -112,6 +112,7 @@ fn setup(mut commands: Commands) {
         },
         Freecam,
     ));
+    client.connect();
 }
 
 #[cfg(feature = "client")]

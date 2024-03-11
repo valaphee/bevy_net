@@ -25,12 +25,12 @@ mod send;
 
 #[derive(Event)]
 pub struct Received<E: Event> {
-    pub sender: Entity,
+    pub source: Entity,
     pub event: E,
 }
 
 pub struct Directed<E: Event> {
-    pub receiver: Entity,
+    pub target: Entity,
     pub event: E,
 }
 
@@ -246,13 +246,13 @@ fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
     world.insert_resource(resource);
 }
 
-fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8], connection: Entity) {
+fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8], source: Entity) {
     use bincode::{DefaultOptions, Options};
 
     let events: Vec<E> = DefaultOptions::new().deserialize_from(input).unwrap();
     world.send_event_batch(events.into_iter().map(|event| {
         Received {
-            sender: connection,
+            source,
             event,
         }
     }));
