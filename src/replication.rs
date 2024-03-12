@@ -4,61 +4,51 @@ use std::{
 };
 
 use bevy::{
-    app::{App, Plugin, PostUpdate, PreUpdate},
+    app::{App, Plugin},
     ecs::{
         component::{Component, ComponentId},
         entity::Entity,
         event::{Event, Events, ManualEventReader},
-        system::{Commands, ResMut, Resource},
+        system::Resource,
         world::{EntityWorldMut, World},
     },
     ptr::Ptr,
     utils::HashMap,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use tokio::sync::mpsc;
+use serde::{de::DeserializeOwned, Serialize};
 
-use self::{recv::recv_updates, send::send_updates};
-
-mod recv;
-mod send;
-
-/// Allows for replication of components and events between multiple Bevy
-/// instances.
+/// Allows for replication of components and events between multiple Bevy instances.
 ///
-/// Replication is opt-in, components or events that need to be sent or received
-/// have to be registered through the send, recv event and component methods in
-/// the App.
+/// Replication is opt-in, components or events that need to be sent or received have to be
+/// registered through the send, recv event and component methods in the App.
 ///
-/// For replication to work, it is also necessary to choose a transport plugin,
-/// as the replication plugin is only reponsible for generating the updates.
+/// For replication to work, it is also necessary to choose a transport plugin, as the replication
+/// plugin is only reponsible for generating the updates.
 pub struct ReplicationPlugin;
 
 impl Plugin for ReplicationPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Replication>();
-
-        app.add_systems(PreUpdate, (spawn_new_connections, recv_updates))
-            .add_systems(PostUpdate, send_updates);
     }
 }
 
 pub trait AppExt {
+    // Sets up resources for sending, when a resource has been added or changed.
     fn send_resource<R: Resource + Serialize>(&mut self) -> &mut Self;
 
+    // Sets up resources for receiving.
     fn recv_resource<R: Resource + DeserializeOwned>(&mut self) -> &mut Self;
 
-    // Sets up the event for sending, when new events arrive.
+    // Sets up events for sending, when new events arrive.
     fn send_event<E: Event + Serialize>(&mut self) -> &mut Self;
 
-    // Sets up the event for receiving.
+    // Sets up events for receiving.
     fn recv_event<E: Event + DeserializeOwned>(&mut self) -> &mut Self;
 
-    // Sets up the component for sending, when a component has been added, changed
-    // or removed.
+    // Sets up components for sending, when a component has been added, changed or removed.
     fn send_component<C: Component + Serialize>(&mut self) -> &mut Self;
 
-    // Sets up the component for receiving.
+    // Sets up components for receiving.
     fn recv_component<C: Component + DeserializeOwned>(&mut self) -> &mut Self;
 }
 
@@ -75,7 +65,7 @@ impl AppExt for App {
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication.send_resource_data.insert(
+        replication.send_resource.insert(
             component_id,
             SendResourceData {
                 type_hash,
@@ -95,10 +85,9 @@ impl AppExt for App {
 
         // Add deserializer (incl. handler) for the given resource id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication.resource_deserializers.insert(
-            type_hash,
-            deserialize_and_insert_resource::<R>,
-        );
+        replication
+            .recv_resource
+            .insert(type_hash, deserialize_and_insert_resource::<R>);
 
         self
     }
@@ -122,7 +111,7 @@ impl AppExt for App {
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication.send_event_data.insert(
+        replication.send_event.insert(
             component_id,
             SendEventData {
                 type_hash,
@@ -134,8 +123,8 @@ impl AppExt for App {
     }
 
     fn recv_event<E: Event + DeserializeOwned>(&mut self) -> &mut Self {
-        // Add event. No component id is required as the event should be added to the
-        // collection by the deserializer (it also acts as an handler).
+        // Add event. No component id is required as the event should be added to the collection by
+        // the deserializer (it also acts as an handler).
         self.add_event::<Received<E>>();
 
         // Generate a hash to uniquly identitfy events of this type across instances.
@@ -147,7 +136,7 @@ impl AppExt for App {
         // Add deserializer (incl. handler) for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
         replication
-            .event_deserializers
+            .recv_event
             .insert(type_hash, deserialize_and_send_events::<E>);
 
         self
@@ -165,7 +154,7 @@ impl AppExt for App {
 
         // Add serializer for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication.send_component_data.insert(
+        replication.send_component.insert(
             component_id,
             SendComponentData {
                 type_hash,
@@ -185,7 +174,7 @@ impl AppExt for App {
 
         // Add deserializer (incl. handler) for the given component id.
         let mut replication = self.world.resource_mut::<Replication>();
-        replication.component_deserializers_and_removers.insert(
+        replication.recv_component.insert(
             type_hash,
             (deserialize_and_insert_component::<C>, remove_component::<C>),
         );
@@ -194,28 +183,63 @@ impl AppExt for App {
     }
 }
 
-fn serialize<T: Serialize>(value: Ptr, output: &mut Vec<u8>) {
+#[derive(Resource, Default)]
+struct Replication {
+    send_resource: HashMap<ComponentId, SendResourceData>,
+    recv_resource: HashMap<u32, ResourceDeserializer>,
+    send_event: HashMap<ComponentId, SendEventData>,
+    recv_event: HashMap<u32, EventDeserializer>,
+    send_component: HashMap<ComponentId, SendComponentData>,
+    recv_component: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
+}
+
+type ResourceSerializer = fn(Ptr, &mut Vec<u8>);
+
+struct SendResourceData {
+    type_hash: u32,
+    serializer: ResourceSerializer,
+}
+
+type ResourceDeserializer = fn(&mut World, &mut &[u8]);
+
+type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
+
+struct SendEventData {
+    type_hash: u32,
+    serializer: EventSerializer,
+}
+
+type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
+
+type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
+
+struct SendComponentData {
+    type_hash: u32,
+    serializer: ComponentSerializer,
+}
+
+type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
+
+type ComponentRemover = fn(&mut EntityWorldMut);
+
+pub fn serialize<T: Serialize>(value: Ptr, output: &mut Vec<u8>) {
     use bincode::{DefaultOptions, Options};
 
-    // SAFETY: serialize is always supplied with the correct type (component ids are
-    // unique).
+    // SAFETY: serialize is always supplied with the correct type (component ids are unique).
     let value: &T = unsafe { value.deref() };
     DefaultOptions::new().serialize_into(output, value).unwrap();
 }
 
-fn serialize_events<E: Event + Serialize>(
+pub fn serialize_events<E: Event + Serialize>(
     events: Ptr,
     output: &mut Vec<u8>,
     last_event_count: &mut usize,
 ) {
     use bincode::{DefaultOptions, Options};
 
-    // SAFETY: serialize_events is always supplied with the correct type (component
-    // ids are unique).
+    // SAFETY: serialize_events is always supplied with the correct type (component ids are unique).
     let events: &Events<E> = unsafe { events.deref() };
     // SAFETY: event_reader is the same size as last_event_count.
-    // TODO: find safe method to initialize ManualEventReader at the right
-    // position.
     let event_reader: &mut ManualEventReader<E> = unsafe { std::mem::transmute(last_event_count) };
     let events = event_reader.read(events).collect::<Vec<_>>();
     if !events.is_empty() {
@@ -225,7 +249,7 @@ fn serialize_events<E: Event + Serialize>(
     }
 }
 
-fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
+pub fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
     world: &mut World,
     input: &mut &[u8],
 ) {
@@ -235,19 +259,18 @@ fn deserialize_and_insert_resource<R: Resource + DeserializeOwned>(
     world.insert_resource(resource);
 }
 
-fn deserialize_and_send_events<E: Event + DeserializeOwned>(world: &mut World, input: &mut &[u8], source: Entity) {
+pub fn deserialize_and_send_events<E: Event + DeserializeOwned>(
+    world: &mut World,
+    input: &mut &[u8],
+    source: Entity,
+) {
     use bincode::{DefaultOptions, Options};
 
     let events: Vec<E> = DefaultOptions::new().deserialize_from(input).unwrap();
-    world.send_event_batch(events.into_iter().map(|event| {
-        Received {
-            source,
-            event,
-        }
-    }));
+    world.send_event_batch(events.into_iter().map(|event| Received { source, event }));
 }
 
-fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
+pub fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity: &mut EntityWorldMut,
     input: &mut &[u8],
 ) {
@@ -257,105 +280,19 @@ fn deserialize_and_insert_component<C: Component + DeserializeOwned>(
     entity.insert(component);
 }
 
-fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
+pub fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
     entity.remove::<C>();
 }
 
+/// 
 #[derive(Event)]
 pub struct Received<E: Event> {
     pub source: Entity,
     pub event: E,
 }
 
+#[derive(Event)]
 pub struct Directed<E: Event> {
     pub target: Entity,
     pub event: E,
-}
-
-#[derive(Resource, Default)]
-struct Replication {
-    send_resource_data: HashMap<ComponentId, SendResourceData>,
-    send_event_data: HashMap<ComponentId, SendEventData>,
-    send_component_data: HashMap<ComponentId, SendComponentData>,
-    resource_deserializers: HashMap<u32, ResourceDeserializer>,
-    event_deserializers: HashMap<u32, EventDeserializer>,
-    component_deserializers_and_removers: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
-}
-
-type ResourceSerializer = fn(Ptr, &mut Vec<u8>);
-
-type ResourceDeserializer = fn(&mut World, &mut &[u8]);
-
-type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
-
-type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
-
-type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
-
-type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
-
-type ComponentRemover = fn(&mut EntityWorldMut);
-
-struct SendResourceData {
-    type_hash: u32,
-    serializer: ResourceSerializer,
-}
-
-struct SendEventData {
-    type_hash: u32,
-    serializer: EventSerializer,
-}
-
-struct SendComponentData {
-    type_hash: u32,
-    serializer: ComponentSerializer,
-}
-
-/// Receiver for receiving newly connected clients, which should be spawned.
-#[derive(Resource)]
-pub struct NewConnectionRx(mpsc::UnboundedReceiver<Connection>);
-
-impl NewConnectionRx {
-    /// Creates a "new connection" receiver.
-    pub fn new(rx: mpsc::UnboundedReceiver<Connection>) -> Self {
-        Self(rx)
-    }
-}
-
-#[derive(Component)]
-pub struct Connection {
-    /// Inbound packets
-    packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    /// Outbound packets
-    packet_tx: mpsc::UnboundedSender<Vec<u8>>,
-
-    /// All known remote entities
-    entity_links: HashMap<u32, Entity>,
-}
-
-impl Connection {
-    /// Creates a new connection
-    pub fn new(
-        packet_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        packet_tx: mpsc::UnboundedSender<Vec<u8>>,
-    ) -> Self {
-        Self {
-            packet_rx,
-            packet_tx,
-            entity_links: Default::default(),
-        }
-    }
-}
-
-/// Spawns new connections
-fn spawn_new_connections(mut commands: Commands, mut new_connection_rx: ResMut<NewConnectionRx>) {
-    while let Ok(connection) = new_connection_rx.0.try_recv() {
-        commands.spawn(connection);
-    }
-}
-
-#[derive(Event, Serialize, Deserialize)]
-struct LinkEntityEvent {
-    remote: u32,
-    local: Entity,
 }
