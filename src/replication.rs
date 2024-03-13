@@ -284,7 +284,6 @@ pub fn remove_component<C: Component>(entity: &mut EntityWorldMut) {
     entity.remove::<C>();
 }
 
-/// 
 #[derive(Event)]
 pub struct Received<E: Event> {
     pub source: Entity,

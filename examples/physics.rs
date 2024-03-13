@@ -14,13 +14,13 @@ fn main() {
 }
 
 #[derive(Component)]
-struct Pawn;
+struct Player;
 
 #[derive(Component)]
-struct PawnCamera;
+struct PlayerCamera;
 
 #[derive(Component)]
-struct Cube;
+struct Attractable;
 
 fn setup(
     mut commands: Commands,
@@ -34,7 +34,11 @@ fn setup(
         PbrBundle {
             mesh: cube_mesh.clone(),
             material: materials.add(Color::DARK_GRAY),
-            transform: Transform { translation: Vec3::new(0.0, -1.0, 0.0), scale: Vec3::new(100.0, 1.0, 100.0), ..Default::default() },
+            transform: Transform {
+                translation: Vec3::new(0.0, -1.0, 0.0),
+                scale: Vec3::new(100.0, 1.0, 100.0),
+                ..Default::default()
+            },
             ..default()
         },
         RigidBody::Static,
@@ -57,19 +61,28 @@ fn setup(
         PbrBundle {
             mesh: cube_mesh.clone(),
             material: materials.add(Color::RED),
-            transform: Transform { translation: Vec3::new(0.0, 2.0, 0.0), scale: Vec3::splat(2.0), ..Default::default() },
+            transform: Transform {
+                translation: Vec3::new(0.0, 2.0, 0.0),
+                scale: Vec3::splat(2.0),
+                ..Default::default()
+            },
             ..default()
         },
         RigidBody::Dynamic,
         Collider::cuboid(1.0, 1.0, 1.0),
-        Pawn,
+        Friction::new(5.0),
+        Mass(10.0),
+        Player,
     ));
 
     // Camera
-    commands.spawn((Camera3dBundle {
-        transform: Transform::default().looking_at(Vec3::new(-25.0, -15.0, 0.0), Vec3::Y),
-        ..default()
-    }, PawnCamera));
+    commands.spawn((
+        Camera3dBundle {
+            transform: Transform::default().looking_at(Vec3::new(-25.0, -15.0, 0.0), Vec3::Y),
+            ..default()
+        },
+        PlayerCamera,
+    ));
 
     // Cubes
     for x in -10..10 {
@@ -79,12 +92,17 @@ fn setup(
                 PbrBundle {
                     mesh: cube_mesh.clone(),
                     material: materials.add(Color::GRAY),
-                    transform: Transform { translation: position, scale: Vec3::splat(0.5), ..Default::default() },
+                    transform: Transform {
+                        translation: position,
+                        scale: Vec3::splat(0.5),
+                        ..Default::default()
+                    },
                     ..default()
                 },
                 RigidBody::Dynamic,
                 Collider::cuboid(1.0, 1.0, 1.0),
-                Cube,
+                Friction::new(5.0),
+                Attractable,
             ));
         }
     }
@@ -93,13 +111,13 @@ fn setup(
 fn movement(
     time: Res<Time>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut pawn: Query<(&Transform, &mut AngularVelocity), With<Pawn>>,
-    mut pawn_camera: Query<&mut Transform, (With<PawnCamera>, Without<Pawn>)>,
+    mut player: Query<(&Transform, &mut LinearVelocity, &mut AngularVelocity), With<Player>>,
+    mut player_camera: Query<&mut Transform, (With<PlayerCamera>, Without<Player>)>,
 ) {
-    let Ok((transform, mut angular_velocity)) = pawn.get_single_mut() else {
+    let Ok((transform, mut linear_velocity, mut angular_velocity)) = player.get_single_mut() else {
         return;
     };
-    let Ok(mut camera_transform) = pawn_camera.get_single_mut() else {
+    let Ok(mut camera_transform) = player_camera.get_single_mut() else {
         return;
     };
 
@@ -109,14 +127,13 @@ fn movement(
     let right = keyboard_input.any_pressed([KeyCode::KeyD, KeyCode::ArrowRight]);
 
     let horizontal = left as i8 - right as i8;
-    let vertical = up as i8 - down as i8;
-    let direction =
-        Vector::new(horizontal as Scalar, 0.0, vertical as Scalar).normalize_or_zero();
+    let vertical = down as i8 - up as i8;
+    let direction = Vector::new(horizontal as Scalar, 0.0, vertical as Scalar).normalize_or_zero();
 
     if direction != Vector::ZERO {
         let delta_time = time.delta_seconds_f64().adjust_precision();
-        angular_velocity.x = direction.x * delta_time * 250.0;
-        angular_velocity.z = direction.z * delta_time * 250.0;
+        linear_velocity.x += direction.z * delta_time * 10.0;
+        linear_velocity.z += direction.x * delta_time * 10.0;
     }
 
     camera_transform.translation = transform.translation + Vec3::new(25.0, 15.0, 0.0);
@@ -124,8 +141,8 @@ fn movement(
 
 fn attract(
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    pawn: Query<&Transform, With<Pawn>>,
-    mut cubes: Query<(&Transform, &mut LinearVelocity), With<Cube>>,
+    pawn: Query<&Transform, With<Player>>,
+    mut attractables: Query<(&Transform, &mut LinearVelocity), With<Attractable>>,
 ) {
     let Ok(pawn_transform) = pawn.get_single() else {
         return;
@@ -136,11 +153,16 @@ fn attract(
         return;
     }
 
-    for (transform, mut linear_velocity) in cubes.iter_mut() {
-        if pawn_transform.translation.distance_squared(transform.translation) >= 2.5 * 2.5 {
+    for (transform, mut linear_velocity) in attractables.iter_mut() {
+        if pawn_transform
+            .translation
+            .distance_squared(transform.translation)
+            >= 2.5 * 2.5
+        {
             continue;
         }
-        let velocity = (pawn_transform.translation - transform.translation).normalize_or_zero();
+
+        let velocity = pawn_transform.translation - transform.translation;
         linear_velocity.x += velocity.x;
         linear_velocity.y += velocity.y;
         linear_velocity.z += velocity.z;
