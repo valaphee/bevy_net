@@ -18,7 +18,7 @@ futures = "0.3"
 wtransport = { version = "0.1", features = ["dangerous-configuration"] }
 
 [dev-dependencies]
-bevy = { features = ["bevy_winit", "bevy_pbr", "ktx2", "zstd", "tonemapping_luts", "wayland"] }
+bevy = { features = ["bevy_winit", "bevy_pbr", "ktx2", "zstd", "tonemapping_luts", "wayland", "serialize"] }
 bevy_xpbd_3d = { version = "0.4" }
 
 [profile.dev.package."*"]

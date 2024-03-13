@@ -1,17 +1,46 @@
 #![allow(clippy::unnecessary_cast)]
 
 use bevy::prelude::*;
+use bevy_net::{replication::{AppExt, ReplicationPlugin}, transport::wt::{Client, ClientPlugin, ServerPlugin}};
 use bevy_xpbd_3d::{math::*, prelude::*};
+use serde::{Deserialize, Serialize};
 
-fn main() {
-    App::new()
-        .add_plugins((DefaultPlugins, PhysicsPlugins::default()))
+#[tokio::main]
+async fn main() {
+    let client = false;
+
+    let mut app = App::new();
+    app.add_plugins((DefaultPlugins, PhysicsPlugins::default(), ReplicationPlugin))
         .insert_resource(ClearColor(Color::rgb(0.05, 0.05, 0.1)))
         .insert_resource(Msaa::Sample4)
         .add_systems(Startup, setup)
-        .add_systems(Update, (movement, attract))
-        .run();
+        .add_systems(Update, (movement, attract));
+
+    if client {
+        app.add_plugins(ClientPlugin)
+            .send_event::<PlayerInput>()
+            .recv_component::<Transform>()
+            .add_systems(PostStartup, connect);
+    } else {
+        app.add_plugins(ServerPlugin)
+            .recv_event::<PlayerInput>()
+            .send_component::<Transform>();
+    }
+
+    app.run();
 }
+
+#[derive(Event, Serialize, Deserialize)]
+struct PlayerInput {
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+    attract: bool,
+}
+
+#[derive(Component)]
+struct Replicated;
 
 #[derive(Component)]
 struct Player;
@@ -21,6 +50,12 @@ struct PlayerCamera;
 
 #[derive(Component)]
 struct Attractable;
+
+fn connect(
+    client: Res<Client>
+) {
+    client.connect("https://[::1]:4433".to_string())
+}
 
 fn setup(
     mut commands: Commands,
@@ -56,7 +91,7 @@ fn setup(
         ..default()
     });
 
-    // Pawn
+    // Player
     commands.spawn((
         PbrBundle {
             mesh: cube_mesh.clone(),
@@ -75,7 +110,7 @@ fn setup(
         Player,
     ));
 
-    // Camera
+    // Player Camera
     commands.spawn((
         Camera3dBundle {
             transform: Transform::default().looking_at(Vec3::new(-25.0, -15.0, 0.0), Vec3::Y),
@@ -103,9 +138,38 @@ fn setup(
                 Collider::cuboid(1.0, 1.0, 1.0),
                 Friction::new(5.0),
                 Attractable,
+                Replicated,
             ));
         }
     }
+}
+
+fn spawn_player(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+) {
+    let cube_mesh = meshes.add(Cuboid::default());
+
+    // Player
+    commands.spawn((
+        PbrBundle {
+            mesh: cube_mesh.clone(),
+            material: materials.add(Color::RED),
+            transform: Transform {
+                translation: Vec3::new(0.0, 2.0, 0.0),
+                scale: Vec3::splat(2.0),
+                ..Default::default()
+            },
+            ..default()
+        },
+        RigidBody::Dynamic,
+        Collider::cuboid(1.0, 1.0, 1.0),
+        Friction::new(5.0),
+        Mass(10.0),
+        Player,
+        Replicated,
+    ));
 }
 
 fn movement(

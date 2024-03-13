@@ -184,43 +184,43 @@ impl AppExt for App {
 }
 
 #[derive(Resource, Default)]
-struct Replication {
-    send_resource: HashMap<ComponentId, SendResourceData>,
-    recv_resource: HashMap<u32, ResourceDeserializer>,
-    send_event: HashMap<ComponentId, SendEventData>,
-    recv_event: HashMap<u32, EventDeserializer>,
-    send_component: HashMap<ComponentId, SendComponentData>,
-    recv_component: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
+pub(crate) struct Replication {
+    pub(crate) send_resource: HashMap<ComponentId, SendResourceData>,
+    pub(crate) recv_resource: HashMap<u32, ResourceDeserializer>,
+    pub(crate) send_event: HashMap<ComponentId, SendEventData>,
+    pub(crate) recv_event: HashMap<u32, EventDeserializer>,
+    pub(crate) send_component: HashMap<ComponentId, SendComponentData>,
+    pub(crate) recv_component: HashMap<u32, (ComponentDeserializer, ComponentRemover)>,
 }
 
-type ResourceSerializer = fn(Ptr, &mut Vec<u8>);
+pub(crate) type ResourceSerializer = fn(Ptr, &mut Vec<u8>);
 
-struct SendResourceData {
-    type_hash: u32,
-    serializer: ResourceSerializer,
+pub(crate) struct SendResourceData {
+    pub(crate) type_hash: u32,
+    pub(crate) serializer: ResourceSerializer,
 }
 
-type ResourceDeserializer = fn(&mut World, &mut &[u8]);
+pub(crate) type ResourceDeserializer = fn(&mut World, &mut &[u8]);
 
-type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
+pub(crate) type EventSerializer = fn(Ptr, &mut Vec<u8>, &mut usize);
 
-struct SendEventData {
-    type_hash: u32,
-    serializer: EventSerializer,
+pub(crate) struct SendEventData {
+    pub(crate) type_hash: u32,
+    pub(crate) serializer: EventSerializer,
 }
 
-type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
+pub(crate)type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
 
-type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
+pub(crate) type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
 
-struct SendComponentData {
-    type_hash: u32,
-    serializer: ComponentSerializer,
+pub(crate) struct SendComponentData {
+    pub(crate) type_hash: u32,
+    pub(crate) serializer: ComponentSerializer,
 }
 
-type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
+pub(crate) type ComponentDeserializer = fn(&mut EntityWorldMut, &mut &[u8]);
 
-type ComponentRemover = fn(&mut EntityWorldMut);
+pub(crate) type ComponentRemover = fn(&mut EntityWorldMut);
 
 pub fn serialize<T: Serialize>(value: Ptr, output: &mut Vec<u8>) {
     use bincode::{DefaultOptions, Options};
