@@ -19,11 +19,10 @@ use serde::{de::DeserializeOwned, Serialize};
 
 /// Allows for replication of components and events between multiple Bevy instances.
 ///
-/// Replication is opt-in, components or events that need to be sent or received have to be
-/// registered through the send, recv event and component methods in the App.
+/// Replication is opt-in, resources, components or events that need to be sent or received have to
+/// be registered through the send, recv methods in the App.
 ///
-/// For replication to work, it is also necessary to choose a transport plugin, as the replication
-/// plugin is only reponsible for generating the updates.
+/// For replication to work, it is also necessary to choose a transport plugin.
 pub struct ReplicationPlugin;
 
 impl Plugin for ReplicationPlugin {

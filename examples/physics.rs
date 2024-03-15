@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 use bevy_net::{
     replication::{AppExt, ReplicationPlugin},
-    transport::wt::{Client, ClientPlugin, ServerPlugin},
+    transport::wt::{Network, NetworkPlugin, ServerPlugin},
 };
 use bevy_xpbd_3d::{math::*, prelude::*};
 use clap::Parser;
@@ -28,7 +28,7 @@ fn main() {
     match Mode::parse() {
         Mode::Standalone => {}
         Mode::Client => {
-            app.add_plugins(ClientPlugin)
+            app.add_plugins(NetworkPlugin)
                 .recv_component::<Transform>()
                 .add_systems(PostStartup, connect);
         }
@@ -117,7 +117,7 @@ fn setup(
     }
 }
 
-fn connect(client: Res<Client>) {
+fn connect(client: Res<Network>) {
     client.connect("https://[::1]:4433".to_string());
 }
 

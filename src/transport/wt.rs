@@ -1,7 +1,7 @@
-use std::time::Duration;
+use std::net::SocketAddr;
 
 use bevy::{
-    app::{App, Plugin, PostStartup, PostUpdate, PreUpdate, Update},
+    app::{App, Plugin, PostUpdate, PreUpdate, Update},
     ecs::{
         component::{Component, ComponentId, StorageType},
         entity::Entity,
@@ -10,7 +10,6 @@ use bevy::{
         system::{Commands, Local, Query, Res, ResMut, Resource, SystemChangeTick},
         world::World,
     },
-    log::info,
     utils::HashMap,
 };
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
@@ -23,125 +22,65 @@ use wtransport::{Certificate, ClientConfig, Endpoint, ServerConfig};
 
 use crate::replication::{Received, Replication};
 
-pub struct ServerPlugin;
+pub struct NetworkPlugin;
 
-impl Plugin for ServerPlugin {
+impl Plugin for NetworkPlugin {
     fn build(&self, app: &mut App) {
         let tokio_runtime = Runtime::new().unwrap();
         let tokio_handle = tokio_runtime.handle().clone();
-        app.insert_resource(Server {
-            _tokio_runtime: tokio_runtime,
-            tokio_handle: tokio_handle.clone(),
-        });
-
-        let listen = move |mut commands: Commands| {
-            let (incoming_connection_tx, incoming_connection_rx) = mpsc::unbounded_channel();
-            commands.insert_resource(IncomingConnectionRx(incoming_connection_rx));
-
-            let _guard = tokio_handle.enter();
-            tokio::spawn(async move {
-                let server_config = ServerConfig::builder()
-                    .with_bind_default(4433)
-                    .with_certificate(Certificate::self_signed(["localhost"]))
-                    .keep_alive_interval(Some(Duration::from_secs(3)))
-                    .build();
-                let endpoint = Endpoint::server(server_config).unwrap();
-
-                info!("Listening on 4433");
-
-                loop {
-                    let incoming_session = endpoint.accept().await;
-
-                    let incoming_connection_tx = incoming_connection_tx.clone();
-                    tokio::spawn(async move {
-                        let session_request = incoming_session.await.unwrap();
-                        let connection = session_request.accept().await.unwrap();
-
-                        let (rx_tx, rx_rx) = mpsc::unbounded_channel();
-                        let (tx_tx, mut tx_rx) = mpsc::unbounded_channel();
-                        incoming_connection_tx
-                            .send(Connection {
-                                rx: rx_rx,
-                                tx: tx_tx,
-                                entity_links: HashMap::default(),
-                            })
-                            .unwrap();
-
-                        loop {
-                            tokio::select! {
-                                message = connection.receive_datagram() => {
-                                    if let Ok(message) = message {
-                                        let _ = rx_tx.send(message.to_vec());
-                                    } else {
-                                        break;
-                                    }
-                                }
-                                message = tx_rx.recv() => {
-                                    if let Some(message) = message {
-                                        if connection.send_datagram(message).is_err() {
-                                            break;
-                                        }
-                                    } else {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-
-                        tx_rx.close();
-                        let _ = connection.close(0u8.into(), &[]);
-                    });
-                }
-            });
-        };
-
-        app.add_systems(PostStartup, listen)
-            .add_systems(PreUpdate, (recv_updates, spawn_incoming_connections))
-            .add_systems(Update, link_entities)
-            .add_systems(PostUpdate, send_updates);
-    }
-}
-
-#[derive(Resource)]
-pub struct Server {
-    _tokio_runtime: Runtime,
-    tokio_handle: Handle,
-}
-
-pub struct ClientPlugin;
-
-impl Plugin for ClientPlugin {
-    fn build(&self, app: &mut App) {
         let (incoming_connection_tx, incoming_connection_rx) = mpsc::unbounded_channel();
-        app.insert_resource(IncomingConnectionRx(incoming_connection_rx));
-
-        let tokio_runtime = Runtime::new().unwrap();
-        let tokio_handle = tokio_runtime.handle().clone();
-        app.insert_resource(Client {
-            incoming_connection_tx,
+        app.insert_resource(Network {
             _tokio_runtime: tokio_runtime,
             tokio_handle,
+            incoming_connection_tx,
+            incoming_connection_rx,
         });
 
-        app.add_systems(PreUpdate, (recv_updates, spawn_incoming_connections))
-            .add_systems(Update, link_entities)
+        app.add_systems(PreUpdate, (recv_updates, spawn_connections))
+            .add_systems(Update, update_entity_links)
             .add_systems(PostUpdate, send_updates);
     }
 }
 
 #[derive(Resource)]
-pub struct Client {
-    incoming_connection_tx: mpsc::UnboundedSender<Connection>,
+pub struct Network {
     _tokio_runtime: Runtime,
     tokio_handle: Handle,
+
+    incoming_connection_rx: mpsc::UnboundedReceiver<Connection>,
+    incoming_connection_tx: mpsc::UnboundedSender<Connection>,
 }
 
-impl Client {
-    pub fn connect(&self, url: String) {
-        info!("Connecting to {}", url);
+impl Network {
+    pub fn listen(&self, address: SocketAddr) {
+        let _guard = self.tokio_handle.enter();
 
         let incoming_connection_tx = self.incoming_connection_tx.clone();
+        tokio::spawn(async move {
+            let server_config = ServerConfig::builder()
+                .with_bind_address(address)
+                .with_certificate(Certificate::self_signed(["localhost"]))
+                .build();
+            let endpoint = Endpoint::server(server_config).unwrap();
+
+            loop {
+                let incoming_session = endpoint.accept().await;
+
+                let incoming_connection_tx = incoming_connection_tx.clone();
+                tokio::spawn(async move {
+                    let session_request = incoming_session.await.unwrap();
+                    let connection = session_request.accept().await.unwrap();
+
+                    handle_connection(incoming_connection_tx, connection).await;
+                });
+            }
+        });
+    }
+
+    pub fn connect(&self, url: String) {
         let _guard = self.tokio_handle.enter();
+
+        let incoming_connection_tx = self.incoming_connection_tx.clone();
         tokio::spawn(async move {
             let client_config = ClientConfig::builder()
                 .with_bind_default()
@@ -153,74 +92,75 @@ impl Client {
                 .await
                 .unwrap();
 
-            let (rx_tx, rx_rx) = mpsc::unbounded_channel();
-            let (tx_tx, mut tx_rx) = mpsc::unbounded_channel();
-            incoming_connection_tx
-                .send(Connection {
-                    rx: rx_rx,
-                    tx: tx_tx,
-                    entity_links: HashMap::default(),
-                })
-                .unwrap();
-
-            loop {
-                tokio::select! {
-                    message = connection.receive_datagram() => {
-                        if let Ok(message) = message {
-                            let _ = rx_tx.send(message.to_vec());
-                        } else {
-                            break;
-                        }
-                    }
-                    message = tx_rx.recv() => {
-                        if let Some(message) = message {
-                            if connection.send_datagram(message).is_err() {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-
-            tx_rx.close();
-            let _ = connection.close(0u8.into(), &[]);
+            handle_connection(incoming_connection_tx, connection).await;
         });
     }
 }
 
-#[derive(Resource)]
-struct IncomingConnectionRx(mpsc::UnboundedReceiver<Connection>);
+async fn handle_connection(
+    incoming_connection_tx: mpsc::UnboundedSender<Connection>,
+    connection: wtransport::connection::Connection,
+) {
+    let (rx_message_tx, rx_message_rx) = mpsc::unbounded_channel();
+    let (tx_message_tx, mut tx_message_rx) = mpsc::unbounded_channel();
+    incoming_connection_tx
+        .send(Connection {
+            message_rx: rx_message_rx,
+            message_tx: tx_message_tx,
+            entity_links: HashMap::default(),
+        })
+        .unwrap();
+
+    loop {
+        tokio::select! {
+            message = connection.receive_datagram() => {
+                if let Ok(message) = message {
+                    let _ = rx_message_tx.send(message.to_vec());
+                } else {
+                    break;
+                }
+            }
+            message = tx_message_rx.recv() => {
+                if let Some(message) = message {
+                    if connection.send_datagram(message).is_err() {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    tx_message_rx.close();
+    let _ = connection.close(0u8.into(), &[]);
+}
 
 #[derive(Component)]
 pub struct Connection {
-    rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    tx: mpsc::UnboundedSender<Vec<u8>>,
+    message_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    message_tx: mpsc::UnboundedSender<Vec<u8>>,
 
     entity_links: HashMap<u32, Entity>,
 }
 
 #[derive(Event, Serialize, Deserialize)]
-pub struct LinkEntityEvent {
-    remote: u32,
+pub struct EntityLinkEvent {
     local: u32,
+    remote: u32,
 }
 
-fn spawn_incoming_connections(
-    mut commands: Commands,
-    mut incoming_connection_rx: ResMut<IncomingConnectionRx>,
-) {
-    while let Ok(connection) = incoming_connection_rx.0.try_recv() {
+fn spawn_connections(mut commands: Commands, mut network: ResMut<Network>) {
+    while let Ok(connection) = network.incoming_connection_rx.try_recv() {
         commands.spawn(connection);
     }
 }
 
-fn link_entities(
-    mut events: EventReader<Received<LinkEntityEvent>>,
+fn update_entity_links(
+    mut entity_link_events: EventReader<Received<EntityLinkEvent>>,
     mut connections: Query<&mut Connection>,
 ) {
-    for event in events.read() {
+    for event in entity_link_events.read() {
         connections
             .get_mut(event.source)
             .unwrap()
@@ -236,49 +176,43 @@ fn recv_updates(world: &mut World) {
     let mut connections =
         unsafe { unsafe_world_cell.world_mut() }.query::<(Entity, &mut Connection)>();
     for (entity, mut connection) in connections.iter_mut(unsafe { unsafe_world_cell.world_mut() }) {
-        while let Ok(update) = connection.rx.try_recv() {
-            let mut update = update.as_slice();
+        while let Ok(message) = connection.message_rx.try_recv() {
+            let mut message = message.as_slice();
 
-            println!("Receiving");
-            // Read all events.
-            let mut type_hash = update.read_u32::<LittleEndian>().unwrap();
+            let mut type_hash = message.read_u32::<LittleEndian>().unwrap();
             while type_hash != 0 {
                 if let Some(deserializer) = replication.recv_resource.get(&type_hash) {
-                    // println!("Receiving res");
-                    deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut update);
+                    deserializer(unsafe { unsafe_world_cell.world_mut() }, &mut message);
                 } else if let Some(deserializer) = replication.recv_event.get(&type_hash) {
-                    println!("Receiving event");
                     deserializer(
                         unsafe { unsafe_world_cell.world_mut() },
-                        &mut update,
+                        &mut message,
                         entity,
                     );
-                } else if let Some((deserializer, remover)) =
+                } else if let Some((deserializer, _remover)) =
                     replication.recv_component.get(&type_hash)
                 {
-                    let mut entity = update.read_u32::<LittleEndian>().unwrap();
+                    let mut entity = message.read_u32::<LittleEndian>().unwrap();
                     while entity != 0 {
                         let mut entity_world = if let Some(entity) =
                             connection.entity_links.get(&entity)
                         {
-                            println!("Found entity link for {entity:?}");
                             unsafe { unsafe_world_cell.world_mut() }.entity_mut(*entity)
                         } else {
-                            println!("New entity link for {entity}");
                             let entity_world = unsafe { unsafe_world_cell.world_mut() }.spawn(());
                             connection.entity_links.insert(entity, entity_world.id());
-                            unsafe { unsafe_world_cell.world_mut() }.send_event(LinkEntityEvent {
+                            unsafe { unsafe_world_cell.world_mut() }.send_event(EntityLinkEvent {
                                 remote: entity,
                                 local: entity_world.id().index(),
                             });
                             entity_world
                         };
-                        deserializer(&mut entity_world, &mut update);
+                        deserializer(&mut entity_world, &mut message);
 
-                        entity = update.read_u32::<LittleEndian>().unwrap();
+                        entity = message.read_u32::<LittleEndian>().unwrap();
                     }
                 }
-                type_hash = update.read_u32::<LittleEndian>().unwrap();
+                type_hash = message.read_u32::<LittleEndian>().unwrap();
             }
         }
     }
@@ -302,9 +236,9 @@ fn send_updates(
     replication: Res<Replication>,
 ) {
     for connection in connections.iter() {
-        let mut update = Vec::new();
+        let mut message = Vec::new();
 
-        // Write all resources.
+        // Write all resources added/updated.
         for (component_id, send_resource_data) in replication.send_resource.iter() {
             let resource_data = world.storages().resources.get(*component_id).unwrap();
             let resource = unsafe { resource_data.get_data().unwrap_unchecked() };
@@ -314,12 +248,10 @@ fn send_updates(
                 continue;
             }
 
-            update
+            message
                 .write_u32::<LittleEndian>(send_resource_data.type_hash)
                 .unwrap();
-            (send_resource_data.serializer)(resource, &mut update);
-
-            // println!("Update resource {component_id:?}")
+            (send_resource_data.serializer)(resource, &mut message);
         }
 
         // Write all events.
@@ -331,56 +263,23 @@ fn send_updates(
                 .entry(send_event_data.type_hash)
                 .or_default();
 
-            update
+            message
                 .write_u32::<LittleEndian>(send_event_data.type_hash)
                 .unwrap();
-            let update_pos = update.len();
-            (send_event_data.serializer)(resource, &mut update, event_reader);
+            let message_data_begin = message.len();
+            (send_event_data.serializer)(resource, &mut message, event_reader);
 
             // Check if any event was written.
-            if update_pos == update.len() {
+            if message_data_begin == message.len() {
                 // Drop type hash.
-                update.truncate(update_pos - std::mem::size_of::<u32>());
-            } else {
-                println!("Send event {component_id:?}")
-            }
-        }
-
-        // Write all component remove events (bundle together with events as they have
-        // the same reliability requirements).
-        for (component_id, send_component_data) in &replication.send_component {
-            let Some(events) = component_remove_events.get(*component_id) else {
-                continue;
-            };
-            let event_reader = component_remove_event_readers
-                .entry(*component_id)
-                .or_default();
-
-            update
-                .write_u32::<LittleEndian>(send_component_data.type_hash)
-                .unwrap();
-            let update_pos = update.len();
-            for event in event_reader.read(events).cloned() {
-                update
-                    .write_u32::<LittleEndian>(Entity::from(event).index())
-                    .unwrap();
-            }
-
-            // Check if any entity was written.
-            if update_pos == update.len() {
-                // Drop type hash.
-                update.truncate(update_pos - std::mem::size_of::<u32>());
-            } else {
-                // Null-terminated.
-                update.write_u32::<LittleEndian>(0).unwrap();
-                // println!("Drop component {component_id:?}")
+                message.truncate(message_data_begin - std::mem::size_of::<u32>());
             }
         }
 
         // Write all components added/updated.
         for archetype in world.archetypes().iter() {
             // SAFETY: The archetype was obtained from this world and always
-            // has an table.
+            // has a table.
             let table = unsafe {
                 world
                     .storages()
@@ -395,10 +294,10 @@ fn send_updates(
                     continue;
                 };
 
-                update
+                message
                     .write_u32::<LittleEndian>(send_component_data.type_hash)
                     .unwrap();
-                let mut update_pos = update.len();
+                let mut message_array_begin = message.len();
 
                 // SAFETY: The component was obtained from this archetype and
                 // always has a storage type.
@@ -424,31 +323,30 @@ fn send_updates(
                                 continue;
                             }
 
-                            let update_pos_inner = update.len();
-                            update
+                            let message_element_begin = message.len();
+                            message
                                 .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
-                            (send_component_data.serializer)(component, &mut update);
-                            // println!("Update component {component_id:?}");
+                            (send_component_data.serializer)(component, &mut message);
 
-                            if update.len() > 1346 {
-                                {
-                                    let mut update_ow = &mut update[update_pos_inner..][..4];
-                                    update_ow.write_u32::<LittleEndian>(0);
-                                }
-                                connection.tx.send(update.clone()).unwrap();
-                                update.clear();
-                                update.write_u8(0);
-                                update.write_u32::<LittleEndian>(0);
+                            if message.len() > 1346 {
+                                let mut message_array_end =
+                                    &mut message[message_element_begin..][..4];
+                                message_array_end.write_u32::<LittleEndian>(0).unwrap();
+                                connection
+                                    .message_tx
+                                    .send(message[..message_element_begin + 4].to_vec())
+                                    .unwrap();
+                                message.clear();
 
-                                update
+                                message
                                     .write_u32::<LittleEndian>(send_component_data.type_hash)
                                     .unwrap();
-                                update_pos = update.len();
-                                update
+                                message_array_begin = message.len();
+                                message
                                     .write_u32::<LittleEndian>(archetype_entity.id().index())
                                     .unwrap();
-                                (send_component_data.serializer)(component, &mut update);
+                                (send_component_data.serializer)(component, &mut message);
                             }
                         }
                     }
@@ -480,54 +378,53 @@ fn send_updates(
                                 continue;
                             }
 
-                            let update_pos_inner = update.len();
-                            update
+                            let message_element_begin = message.len();
+                            message
                                 .write_u32::<LittleEndian>(archetype_entity.id().index())
                                 .unwrap();
-                            (send_component_data.serializer)(component, &mut update);
+                            (send_component_data.serializer)(component, &mut message);
 
-                            // println!("Update component {component_id:?}");
-                            if update.len() > 1346 {
-                                {
-                                    let mut update_ow = &mut update[update_pos_inner..][..4];
-                                    update_ow.write_u32::<LittleEndian>(0).unwrap();
-                                }
-                                connection.tx.send(update.clone()).unwrap();
-                                update.clear();
-                                update.write_u8(0).unwrap();
-                                update.write_u32::<LittleEndian>(0).unwrap();
+                            if message.len() > 1346 {
+                                let mut message_array_end =
+                                    &mut message[message_element_begin..][..4];
+                                message_array_end.write_u32::<LittleEndian>(0).unwrap();
+                                connection
+                                    .message_tx
+                                    .send(message[..message_element_begin + 4].to_vec())
+                                    .unwrap();
+                                message.clear();
 
-                                update
+                                message
                                     .write_u32::<LittleEndian>(send_component_data.type_hash)
                                     .unwrap();
-                                update_pos = update.len();
-                                update
+                                message_array_begin = message.len();
+                                message
                                     .write_u32::<LittleEndian>(archetype_entity.id().index())
                                     .unwrap();
-                                (send_component_data.serializer)(component, &mut update);
+                                (send_component_data.serializer)(component, &mut message);
                             }
                         }
                     }
                 }
 
                 // Check if any component was written.
-                if update_pos == update.len() {
+                if message_array_begin == message.len() {
                     // Drop type hash.
-                    update.truncate(update_pos - std::mem::size_of::<u32>());
+                    message.truncate(message_array_begin - std::mem::size_of::<u32>());
                 } else {
                     // Null-terminated.
-                    update.write_u32::<LittleEndian>(0).unwrap();
+                    message.write_u32::<LittleEndian>(0).unwrap();
                 }
             }
         }
 
         // Null-terminated.
-        update.write_u32::<LittleEndian>(0).unwrap();
+        message.write_u32::<LittleEndian>(0).unwrap();
 
         // Skip if update is empty.
-        if update.len() == 1 + 4 + 4 {
+        if message.len() == 1 + 4 + 4 {
             continue;
         }
-        connection.tx.send(update).unwrap();
+        connection.message_tx.send(message).unwrap();
     }
 }
