@@ -209,7 +209,7 @@ pub(crate) struct SendEventData {
     pub(crate) serializer: EventSerializer,
 }
 
-pub(crate)type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
+pub(crate) type EventDeserializer = fn(&mut World, &mut &[u8], Entity);
 
 pub(crate) type ComponentSerializer = fn(Ptr, &mut Vec<u8>);
 

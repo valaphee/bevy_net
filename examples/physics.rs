@@ -1,60 +1,46 @@
 #![allow(clippy::unnecessary_cast)]
 
 use bevy::prelude::*;
-use bevy_net::{replication::{AppExt, ReplicationPlugin}, transport::wt::{Client, ClientPlugin, ServerPlugin}};
+use bevy_net::{
+    replication::{AppExt, ReplicationPlugin},
+    transport::wt::{Client, ClientPlugin, ServerPlugin},
+};
 use bevy_xpbd_3d::{math::*, prelude::*};
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 
-#[tokio::main]
-async fn main() {
-    let client = false;
+#[derive(Parser)]
+enum Mode {
+    Standalone,
+    Client,
+    ListenServer,
+    DedicatedServer,
+}
 
+fn main() {
     let mut app = App::new();
     app.add_plugins((DefaultPlugins, PhysicsPlugins::default(), ReplicationPlugin))
         .insert_resource(ClearColor(Color::rgb(0.05, 0.05, 0.1)))
         .insert_resource(Msaa::Sample4)
         .add_systems(Startup, setup)
-        .add_systems(Update, (movement, attract));
+        .add_systems(Update, (movement, attract, spawn_players));
 
-    if client {
-        app.add_plugins(ClientPlugin)
-            .send_event::<PlayerInput>()
-            .recv_component::<Transform>()
-            .add_systems(PostStartup, connect);
-    } else {
-        app.add_plugins(ServerPlugin)
-            .recv_event::<PlayerInput>()
-            .send_component::<Transform>();
+    match Mode::parse() {
+        Mode::Standalone => {}
+        Mode::Client => {
+            app.add_plugins(ClientPlugin)
+                .recv_component::<Transform>()
+                .add_systems(PostStartup, connect);
+        }
+        Mode::ListenServer => {
+            app.add_plugins(ServerPlugin).send_component::<Transform>();
+        }
+        Mode::DedicatedServer => {
+            todo!()
+        }
     }
 
     app.run();
-}
-
-#[derive(Event, Serialize, Deserialize)]
-struct PlayerInput {
-    up: bool,
-    down: bool,
-    left: bool,
-    right: bool,
-    attract: bool,
-}
-
-#[derive(Component)]
-struct Replicated;
-
-#[derive(Component)]
-struct Player;
-
-#[derive(Component)]
-struct PlayerCamera;
-
-#[derive(Component)]
-struct Attractable;
-
-fn connect(
-    client: Res<Client>
-) {
-    client.connect("https://[::1]:4433".to_string())
 }
 
 fn setup(
@@ -66,6 +52,7 @@ fn setup(
 
     // Ground
     commands.spawn((
+        // Rendering
         PbrBundle {
             mesh: cube_mesh.clone(),
             material: materials.add(Color::DARK_GRAY),
@@ -76,6 +63,7 @@ fn setup(
             },
             ..default()
         },
+        // Physics
         RigidBody::Static,
         Collider::cuboid(1.0, 1.0, 1.0),
     ));
@@ -91,31 +79,14 @@ fn setup(
         ..default()
     });
 
-    // Player
+    // Camera
     commands.spawn((
-        PbrBundle {
-            mesh: cube_mesh.clone(),
-            material: materials.add(Color::RED),
-            transform: Transform {
-                translation: Vec3::new(0.0, 2.0, 0.0),
-                scale: Vec3::splat(2.0),
-                ..Default::default()
-            },
-            ..default()
-        },
-        RigidBody::Dynamic,
-        Collider::cuboid(1.0, 1.0, 1.0),
-        Friction::new(5.0),
-        Mass(10.0),
-        Player,
-    ));
-
-    // Player Camera
-    commands.spawn((
+        // Rendering
         Camera3dBundle {
             transform: Transform::default().looking_at(Vec3::new(-25.0, -15.0, 0.0), Vec3::Y),
             ..default()
         },
+        // Game Logic
         PlayerCamera,
     ));
 
@@ -124,6 +95,7 @@ fn setup(
         for z in -10..10 {
             let position = Vec3::new(x as f32 * 2.0, 0.0, z as f32 * 2.0);
             commands.spawn((
+                // Rendering
                 PbrBundle {
                     mesh: cube_mesh.clone(),
                     material: materials.add(Color::GRAY),
@@ -134,51 +106,60 @@ fn setup(
                     },
                     ..default()
                 },
+                // Physics
                 RigidBody::Dynamic,
                 Collider::cuboid(1.0, 1.0, 1.0),
                 Friction::new(5.0),
+                // Game Logic
                 Attractable,
-                Replicated,
             ));
         }
     }
 }
 
-fn spawn_player(
+fn connect(client: Res<Client>) {
+    client.connect("https://[::1]:4433".to_string());
+}
+
+fn spawn_players(
     mut commands: Commands,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    new_players: Query<Entity, Added<Player>>,
 ) {
     let cube_mesh = meshes.add(Cuboid::default());
 
-    // Player
-    commands.spawn((
-        PbrBundle {
-            mesh: cube_mesh.clone(),
-            material: materials.add(Color::RED),
-            transform: Transform {
-                translation: Vec3::new(0.0, 2.0, 0.0),
-                scale: Vec3::splat(2.0),
-                ..Default::default()
+    for player in new_players.iter() {
+        commands.entity(player).insert((
+            // Rendering
+            PbrBundle {
+                mesh: cube_mesh.clone(),
+                material: materials.add(Color::RED),
+                transform: Transform {
+                    translation: Vec3::new(0.0, 2.0, 0.0),
+                    scale: Vec3::splat(2.0),
+                    ..Default::default()
+                },
+                ..default()
             },
-            ..default()
-        },
-        RigidBody::Dynamic,
-        Collider::cuboid(1.0, 1.0, 1.0),
-        Friction::new(5.0),
-        Mass(10.0),
-        Player,
-        Replicated,
-    ));
+            // Physics
+            RigidBody::Dynamic,
+            Collider::cuboid(1.0, 1.0, 1.0),
+            Friction::new(5.0),
+            Mass(10.0),
+            // Game Logic
+            Player,
+        ));
+    }
 }
 
 fn movement(
     time: Res<Time>,
     keyboard_input: Res<ButtonInput<KeyCode>>,
-    mut player: Query<(&Transform, &mut LinearVelocity, &mut AngularVelocity), With<Player>>,
+    mut player: Query<(&Transform, &mut LinearVelocity), With<Player>>,
     mut player_camera: Query<&mut Transform, (With<PlayerCamera>, Without<Player>)>,
 ) {
-    let Ok((transform, mut linear_velocity, mut angular_velocity)) = player.get_single_mut() else {
+    let Ok((transform, mut linear_velocity)) = player.get_single_mut() else {
         return;
     };
     let Ok(mut camera_transform) = player_camera.get_single_mut() else {
@@ -232,3 +213,12 @@ fn attract(
         linear_velocity.z += velocity.z;
     }
 }
+
+#[derive(Component)]
+struct Player;
+
+#[derive(Component)]
+struct PlayerCamera;
+
+#[derive(Component)]
+struct Attractable;
